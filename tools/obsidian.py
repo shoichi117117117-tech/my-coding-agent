@@ -1,7 +1,7 @@
 import os
 from datetime import datetime
 from pathlib import Path
-from typing import List, Dict, Any
+from typing import List, Dict, Any, Optional
 
 
 class ObsidianAdapter:
@@ -13,25 +13,77 @@ class ObsidianAdapter:
         """
         self.vault_path = Path(vault_path)
 
-    def read_rules(self, relative_rules_folder: str = "30_Resources/AgentRules") -> str:
-        """Read markdown rule files from the target PARA Vault directory."""
+    def read_rules(
+        self,
+        task_instruction: str = "",
+        relative_rules_folder: str = "30_Resources/AgentRules",
+    ) -> str:
+        """
+        Read core engineering rules (e.g., general, KISS, SOLID) unconditionally,
+        and append domain-specific rules (e.g., HTTP, Security, Auth) only if matching
+        keywords are found in the task instruction.
+
+        :param task_instruction: User input task string used for keyword detection.
+        :param relative_rules_folder: Path inside Vault where rules are stored.
+        :return: Concatenated Markdown string of relevant rules.
+        """
         target_dir = self.vault_path / relative_rules_folder
 
+        # Create default rules structure if directory does not exist
         if not target_dir.exists():
             target_dir.mkdir(parents=True, exist_ok=True)
             default_rule = target_dir / "general_rules.md"
             default_rule.write_text(
-                "# General Development Rules\n- Write clean, documented code.\n- Ensure all errors are logged.\n",
+                "# Core Principles\n- Keep It Simple, Stupid (KISS).\n- Don't Repeat Yourself (DRY).\n- Ensure proper error handling.\n",
                 encoding="utf-8",
             )
 
+        # Always read Core rules 
+        core_rule_files = {
+            "general_rules.md",
+            "python_style.md",
+        }
+
+        # Keyword mapping for conditional domain-specific rule loading
+        domain_keywords = {
+            "http_requests.md": ["http", "api", "request", "rest", "endpoint", "fetch", "axios"],
+            "security_auth.md": ["auth", "security", "token", "jwt", "login", "password", "oauth"],
+            "database.md": ["db", "database", "sql", "sqlite", "orm", "query", "postgres"],
+        }
+
+        task_lower = task_instruction.lower()
         rule_texts = []
+
         for md_file in target_dir.glob("*.md"):
-            try:
-                content = md_file.read_text(encoding="utf-8")
-                rule_texts.append(f"--- Rule: {md_file.name} ---\n{content}")
-            except Exception as e:
-                rule_texts.append(f"--- Rule: {md_file.name} (Read Error: {e}) ---")
+            filename = md_file.name.lower()
+
+            # 1. Determine if this file is a domain-specific rule
+            matched_domain_file = None
+            for domain_file in domain_keywords:
+                if domain_file in filename:
+                    matched_domain_file = domain_file
+                    break
+
+            # 2. Filtering logic
+            should_include = False
+
+            # Always read core rules
+            if filename in [f.lower() for f in core_rule_files]:
+                should_include = True
+                
+            else:
+                # Domain rules are included only if task contains relevant keywords
+                keywords = domain_keywords[matched_domain_file]
+                if any(kw in task_lower for kw in keywords):
+                    should_include = True
+
+            # 3. Read and append allowed rule files
+            if should_include:
+                try:
+                    content = md_file.read_text(encoding="utf-8")
+                    rule_texts.append(f"--- Rule: {md_file.name} ---\n{content}")
+                except Exception as e:
+                    rule_texts.append(f"--- Rule: {md_file.name} (Read Error: {e}) ---")
 
         return "\n\n".join(rule_texts) if rule_texts else "No specific rules found."
 

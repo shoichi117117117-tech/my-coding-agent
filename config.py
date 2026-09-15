@@ -9,7 +9,12 @@ load_dotenv()
 class Config:
     """Central configuration class for the coding agent."""
 
+    # Multi-Provider API Keys
     GEMINI_API_KEY: str = os.getenv("GEMINI_API_KEY", "")
+    GROQ_API_KEY: str = os.getenv("GROQ_API_KEY", "")
+    OPENROUTER_API_KEY: str = os.getenv("OPENROUTER_API_KEY", "")
+
+    # Paths & Execution Settings
     OBSIDIAN_VAULT_PATH: Path = Path(
         os.getenv("OBSIDIAN_VAULT_PATH", "./mock_vault")
     )
@@ -17,10 +22,11 @@ class Config:
 
     @classmethod
     def validate(cls) -> None:
-        """Validate that critical environment variables are present."""
-        if not cls.GEMINI_API_KEY:
+        """Validate that at least one AI provider API key is present."""
+        if not (cls.GEMINI_API_KEY or cls.GROQ_API_KEY or cls.OPENROUTER_API_KEY):
             raise ValueError(
-                "GEMINI_API_KEY is missing. Please set it in your .env file."
+                "No API keys found. Please set at least one of "
+                "GEMINI_API_KEY, GROQ_API_KEY, or OPENROUTER_API_KEY in your .env file."
             )
 
 
