@@ -3,7 +3,7 @@ import time
 from typing import List, Dict, Any, Optional
 from google import genai
 from google.genai import types
-from google.genai.errors import APIError
+from openai import OpenAI  # Import standard OpenAI client for GitHub Models
 import litellm
 
 from config import Config
@@ -17,7 +17,6 @@ def extract_response_content(response: Any) -> str:
     if isinstance(response, str):
         return response
 
-    # 1. Standard OpenAI / LiteLLM response structure (choices[0].message.content)
     if hasattr(response, "choices") and response.choices:
         choice = response.choices[0]
         if hasattr(choice, "message"):
@@ -25,11 +24,9 @@ def extract_response_content(response: Any) -> str:
             if hasattr(msg, "content") and msg.content is not None:
                 return msg.content
 
-    # 2. Direct attribute fallback (.content)
     if hasattr(response, "content") and response.content is not None:
         return response.content
 
-    # 3. Dict style response fallback
     if isinstance(response, dict):
         choices = response.get("choices", [])
         if choices and isinstance(choices, list):
@@ -37,12 +34,11 @@ def extract_response_content(response: Any) -> str:
             if isinstance(message, dict) and "content" in message:
                 return message.get("content") or ""
 
-    # Fallback string representation
     return str(response)
 
 
 class BaseAgent:
-    """Base Agent class handling multi-provider LLM calls (Gemini Native -> Groq -> OpenRouter)
+    """Base Agent class handling multi-provider LLM calls (GitHub Models -> Gemini -> Groq -> OpenRouter)
     with automatic failover/fallback logic.
     """
 
@@ -55,28 +51,50 @@ class BaseAgent:
         self.name = name
         self.system_prompt = system_prompt
 
-        # Gemini Native Client
+        # Native Gemini Client Initialization
         self.gemini_client = None
         if getattr(Config, "GEMINI_API_KEY", None):
             self.gemini_client = genai.Client(api_key=Config.GEMINI_API_KEY)
 
-        # Multi-provider fallback pipeline
-        self.model_pipeline = model_fallback_list or [
-            "gemini-2.5-flash",
-            "gemini-3.8-live",
-            "gemini-3.7-flash",
-            "groq/llama-3.3-70b-versatile",
-            "groq/llama-3.1-8b-instant",
-            "groq/qwen/qwen3-32b",
-            "openrouter/respan/span-01-lite",
-            "openrouter/respan/span-01-lite:free",
-            "openrouter/poolside/laguna-s-2.1:free",
-            "openrouter/dots-studio/dots-3-note-preview:free",
-            "github/gpt-4o",
-            "github/gpt-4o-mini",
-            "github/meta-llama-3.3-70b-instruct",
-            "github/phi-4",
-        ]
+        # Native GitHub Models Client Initialization (OpenAI SDK Compatible Endpoint)
+        self.github_client = None
+        if getattr(Config, "GITHUB_API_KEY", None):
+            self.github_client = OpenAI(
+                base_url=Config.GITHUB_MODELS_BASE_URL,
+                api_key=Config.GITHUB_API_KEY,
+            )
+
+        # Retrieve model pipeline from Config or custom list
+        self.model_pipeline = Config.get_model_fallbacks(model_fallback_list)
+
+    def _call_github_models_native(
+        self,
+        model: str,
+        messages: List[Dict[str, Any]],
+        tools: Optional[List[Dict[str, Any]]] = None,
+        response_format: Optional[Dict[str, Any]] = None,
+    ) -> Any:
+        """Call GitHub Models API directly using standard OpenAI SDK client."""
+        if not self.github_client:
+            raise ValueError("GITHUB_API_KEY is not configured in Config.")
+
+        actual_model_name = model.replace("github/", "")
+        full_messages = [{"role": "system", "content": self.system_prompt}] + messages
+
+        kwargs: Dict[str, Any] = {
+            "model": actual_model_name,
+            "messages": full_messages,
+            "temperature": 0.2,
+        }
+
+        if tools:
+            kwargs["tools"] = tools
+            kwargs["tool_choice"] = "auto"
+
+        if response_format:
+            kwargs["response_format"] = response_format
+
+        return self.github_client.chat.completions.create(**kwargs)
 
     def _call_gemini_native(
         self,
@@ -88,10 +106,7 @@ class BaseAgent:
         if not self.gemini_client:
             raise ValueError("GEMINI_API_KEY is not set.")
 
-        # Convert OpenAI style messages to simple string context for native call
         user_content = "\n".join([m.get("content", "") for m in messages if m.get("content")])
-
-        # Handle JSON mode for Gemini Native Config
         mime_type = "application/json" if response_format and response_format.get("type") == "json_object" else "text/plain"
 
         config = types.GenerateContentConfig(
@@ -106,7 +121,6 @@ class BaseAgent:
             config=config,
         )
 
-        # Mocking OpenAI response format for standard interface
         class MockChoice:
             def __init__(self, text):
                 self.message = type("Message", (), {"content": text, "tool_calls": None})()
@@ -139,8 +153,7 @@ class BaseAgent:
         if response_format:
             kwargs["response_format"] = response_format
 
-        response = litellm.completion(**kwargs)
-        return response
+        return litellm.completion(**kwargs)
 
     def call_llm(
         self,
@@ -148,12 +161,20 @@ class BaseAgent:
         tools: Optional[List[Dict[str, Any]]] = None,
         response_format: Optional[Dict[str, Any]] = None,
     ) -> Any:
-        """Executes LLM call trying models in sequence (Gemini -> Groq -> OpenRouter)."""
+        """Executes LLM call trying models in sequence."""
         last_error = None
 
         for model in self.model_pipeline:
             try:
-                if model.startswith("gemini"):
+                if model.startswith("github/"):
+                    logger.info(f"[{self.name}] Calling GitHub Models API directly: {model}")
+                    return self._call_github_models_native(
+                        model=model,
+                        messages=messages,
+                        tools=tools,
+                        response_format=response_format,
+                    )
+                elif model.startswith("gemini/") or model.startswith("gemini-"):
                     logger.info(f"[{self.name}] Calling Native Gemini model: {model}")
                     return self._call_gemini_native(
                         model=model,

@@ -18,20 +18,23 @@ class Config:
     OPENAI_API_KEY: str = os.getenv("OPENAI_API_KEY", "")
     GITHUB_API_KEY: str = os.getenv("GITHUB_API_KEY", "")
 
+    # GitHub Models API Base Endpoint (Azure Inference API)
+    GITHUB_MODELS_BASE_URL: str = "https://models.inference.ai.azure.com"
+
     # Paths & execution settings
     OBSIDIAN_VAULT_PATH: Path = Path(os.getenv("OBSIDIAN_VAULT_PATH", "./mock_vault"))
     MAX_RETRIES: int = int(os.getenv("MAX_RETRIES", "3"))
 
-    # LiteLLM model identifiers for the GitHub Models OpenAI-compatible endpoint.
+    # LiteLLM model identifiers for GitHub Models and fallback providers.
     DEFAULT_MODEL_FALLBACKS: List[str] = [
-        "openai/gpt-4o-mini",
-        "openai/gpt-4o",
-        "meta-llama/Llama-3.3-70B-Instruct",
+        "groq/openai/gpt-oss-120b",
+        "groq/openai/gpt-oss-20b",
+        "groq/qwen/qwen3.8-27b",
     ]
 
     @classmethod
     def get_model_fallbacks(cls, custom_list: Optional[List[str]] = None) -> List[str]:
-        """Return configured model fallbacks, normalizing GitHub Models aliases."""
+        """Return configured model fallbacks, preserving properly formatted model identifiers."""
         models = custom_list
         if models is None:
             override = os.getenv("MODEL_FALLBACK_LIST", "")
@@ -45,15 +48,15 @@ class Config:
 
     @staticmethod
     def normalize_model_name(model_name: str) -> str:
-        """Normalize common GitHub Models aliases to LiteLLM-compatible names."""
+        """Normalize common model aliases to standard provider prefixes."""
         cleaned = model_name.strip()
         if not cleaned:
             return ""
 
         aliases = {
-            "github/gpt-4o-mini": "openai/gpt-4o-mini",
-            "github/gpt-4o": "openai/gpt-4o",
-            "github/meta-llama-3.3-70b-instruct": "meta-llama/Llama-3.3-70B-Instruct",
+            "gpt-4o-mini": "github/gpt-4o-mini",
+            "gpt-4o": "github/gpt-4o",
+            "llama-3.3-70b": "github/meta-llama-3.3-70b-instruct",
         }
         return aliases.get(cleaned.lower(), cleaned)
 
@@ -64,18 +67,15 @@ class Config:
             cls.GEMINI_API_KEY
             or cls.GROQ_API_KEY
             or cls.OPENROUTER_API_KEY
-            or cls.GITHUB_TOKEN
+            or cls.OPENAI_API_KEY
+            or cls.GITHUB_API_KEY
         )
 
     @classmethod
     def validate(cls) -> None:
         """Validate that at least one AI provider API key is present."""
-        if not (cls.GEMINI_API_KEY or cls.GROQ_API_KEY or cls.OPENROUTER_API_KEY or cls.OPENAI_API_KEY or cls.GITHUB_API_KEY):
+        if not cls.has_any_api_key():
             raise ValueError(
                 "No API keys found. Please set at least one of "
-                "GEMINI_API_KEY, GROQ_API_KEY, or OPENROUTER_API_KEY, or OPENAI_API_KEY or GITHUB_API_KEYin your .env file."
+                "GEMINI_API_KEY, GROQ_API_KEY, OPENROUTER_API_KEY, OPENAI_API_KEY, or GITHUB_API_KEY in your .env file."
             )
-
-
-# Validation is intentionally opt-in so offline tests and static checks do not need
-# live credentials. Call Config.validate() at application startup when required.
