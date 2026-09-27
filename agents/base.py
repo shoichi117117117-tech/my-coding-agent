@@ -63,11 +63,19 @@ class BaseAgent:
         # Multi-provider fallback pipeline
         self.model_pipeline = model_fallback_list or [
             "gemini-2.5-flash",
-            "gemini-2.5-pro",
+            "gemini-3.8-live",
+            "gemini-3.7-flash",
             "groq/llama-3.3-70b-versatile",
             "groq/llama-3.1-8b-instant",
-            "openrouter/meta-llama/llama-3.3-70b-instruct",
-            "openrouter/deepseek/deepseek-r1",
+            "groq/qwen/qwen3-32b",
+            "openrouter/respan/span-01-lite",
+            "openrouter/respan/span-01-lite:free",
+            "openrouter/poolside/laguna-s-2.1:free",
+            "openrouter/dots-studio/dots-3-note-preview:free",
+            "github/gpt-4o",
+            "github/gpt-4o-mini",
+            "github/meta-llama-3.3-70b-instruct",
+            "github/phi-4",
         ]
 
     def _call_gemini_native(

@@ -105,7 +105,7 @@ class PlannerAgent(BaseAgent):
         return content
 
     def suggest_project_structure(self, task_instruction: str) -> Dict[str, str]:
-        """Infers clean project directory name (snake_case) and main target filename based on user task."""
+        """Infers clean project directory name (lower_snake_case) and main target filename based on user task."""
         clean_instruction = re.sub(r"\s+", " ", task_instruction).strip()
         short_task = clean_instruction[:500]
 
@@ -135,8 +135,11 @@ class PlannerAgent(BaseAgent):
             raw_folder = parsed.get("folder_name", "")
             raw_main = parsed.get("main_file", "")
 
-            # Convert spaces and hyphens to underscores and clean invalid characters
-            folder = re.sub(r"[^a-z0-9_]", "", raw_folder.lower().replace(" ", "_").replace("-", "_")).strip("_")
+            # Convert spaces/hyphens to underscores and sanitize string strictly for valid lower_snake_case folder names
+            folder = raw_folder.lower().replace(" ", "_").replace("-", "_")
+            folder = re.sub(r"[^a-z0-9_]", "", folder)
+            folder = re.sub(r"_+", "_", folder).strip("_")
+
             main_file = re.sub(r"[^\w\.-]", "", raw_main).strip()
 
             # Guard against fallback or overly generic folder names

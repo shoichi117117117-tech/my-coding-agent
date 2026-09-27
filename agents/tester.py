@@ -1,6 +1,7 @@
 import json
 import logging
 import re
+import textwrap
 from datetime import datetime
 from pathlib import Path
 from typing import List, Dict, Any, Optional
@@ -297,40 +298,49 @@ class TesterAgent(BaseAgent):
         save_to_vault: bool = True,
         relative_folder: str = "30_Resources/Troubleshooting",
     ) -> str:
-        """Generates structured Markdown note for troubleshooting and archives to Obsidian Vault."""
+        """Generates structured Markdown note for troubleshooting and archives to Obsidian Vault deterministically."""
         today_str = datetime.now().strftime("%Y-%m-%d")
 
         user_prompt = (
-            f"Please generate a clean Obsidian Troubleshooting Markdown note in English for this resolved issue:\n\n"
-            f"Title: {error_title}\n\n"
-            f"Error Output:\n```text\n{error_log}\n```\n\n"
+            f"Analyze the following resolved issue and provide detailed content for a troubleshooting note:\n\n"
+            f"Title: {error_title}\n"
+            f"Error Output:\n```text\n{error_log}\n```\n"
             f"Solution Applied:\n{solution_summary}\n\n"
-            f"CRITICAL: Output ONLY the raw markdown content without enclosing it in ```markdown codeblock.\n"
-            f"The output MUST start immediately with `---` on the very first line.\n\n"
-            f"Format:\n"
-            f"---\n"
-            f"type: troubleshooting\n"
-            f"date: '{today_str}'\n"
-            f"tags:\n"
-            f"  - error-solution\n"
-            f"  - testing\n"
-            f"---\n\n"
-            f"# [Issue] {error_title}\n\n"
-            f"## 1. Symptom & Error Log\n"
-            f"## 2. Root Cause Analysis\n"
-            f"## 3. Solution & Prevention Rule\n\n"
-            f"Use WikiLinks like `[[Python]]` or `[[Testing-Guide]]` where appropriate."
+            f"Instructions:\n"
+            f"1. Explain the Root Cause Analysis (RCA) in detail under a '## 2. Root Cause Analysis' section.\n"
+            f"2. Summarize the Solution & Prevention Rules clearly under a '## 3. Solution & Prevention Rules' section.\n"
+            f"3. Use Obsidian WikiLinks (e.g., [[Python]], [[Pytest]], [[FastAPI]]) where appropriate.\n"
+            f"4. Do NOT include Frontmatter (---) or the main title (# Title). Start directly with the '## 2. Root Cause Analysis' header."
         )
 
         messages = [{"role": "user", "content": user_prompt}]
         response = self.call_llm(messages=messages)
-        raw_content = extract_response_content(response).strip()
+        body_content = extract_response_content(response).strip()
 
-        match = re.search(r"```(?:markdown)?\s*([\s\S]*?)\s*```", raw_content, re.IGNORECASE)
+        # Clean outer markdown code block wrapper if the LLM wrapped the whole response in markdown block
+        match = re.search(r"^```(?:markdown)?\s*([\s\S]*?)\s*```$", body_content, re.IGNORECASE)
         if match:
-            markdown_content = match.group(1).strip()
-        else:
-            markdown_content = raw_content
+            body_content = match.group(1).strip()
+
+        # Construct deterministic Obsidian note with textwrap.dedent to ensure frontmatter starts at line 1 column 1
+        markdown_content = textwrap.dedent(f"""\
+            ---
+            type: troubleshooting
+            date: '{today_str}'
+            tags:
+              - error-solution
+              - troubleshooting
+            ---
+
+            # [Issue] {error_title}
+
+            ## 1. Symptom & Error Log
+            ```text
+            {error_log.strip()}
+            ```
+
+            {body_content}
+        """)
 
         if save_to_vault and self.obsidian_adapter:
             try:
