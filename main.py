@@ -158,6 +158,21 @@ def run_agent_workflow() -> None:
     # Phase 3~5: Closed-Loop ReAct / Self-Correction Cycle
     # ---------------------------------------------------------
     while True:
+        if retry_count >= Config.MAX_RETRIES:
+            console.print(
+                Panel(
+                    "[bold red]Reached maximum retry limit. Handing off to human operator.[/bold red]",
+                    title="[bold yellow]⚠️ Retry Limit Reached[/bold yellow]",
+                    border_style="yellow",
+                )
+            )
+            obsidian.append_log(
+                task_description=task_instruction,
+                status="FAILED_MAX_RETRIES",
+                execution_history=execution_history,
+            )
+            break
+
         attempt_num = retry_count + 1
         console.print(f"\n[bold cyan]🤖 [Iteration {attempt_num}/{Config.MAX_RETRIES}][/bold cyan]")
 
@@ -334,36 +349,6 @@ def run_agent_workflow() -> None:
                     relative_folder="30_Resources/Troubleshooting",
                 )
             console.print("[dim magenta]📓 Troubleshooting document saved to Obsidian Vault.[/dim magenta]")
-
-            if retry_count >= Config.MAX_RETRIES:
-                console.print(
-                    Panel(
-                        "[bold red]Reached maximum retry limit. Handing off to human operator.[/bold red]\n\n"
-                        "[bold yellow]Options:[/bold yellow]\n"
-                        "  • Type specific hints/feedback to guide next retry attempt\n"
-                        "  • Press [bold white]ENTER[/bold white] or [bold white]'r'[/bold white] to retry without new hints\n"
-                        "  • Type [bold white]'q'[/bold white] to quit execution",
-                        title="[bold yellow]⚠️ Human Intervention Required[/bold yellow]",
-                        border_style="yellow",
-                    )
-                )
-
-                user_feedback = Prompt.ask("[bold yellow]Your decision[/bold yellow]", default="r").strip()
-
-                if user_feedback.lower() == "q":
-                    console.print("[bold red]👋 Task execution terminated by user.[/bold red]")
-                    obsidian.append_log(
-                        task_description=task_instruction,
-                        status="ABORTED_BY_USER",
-                        execution_history=execution_history,
-                    )
-                    break
-
-                if user_feedback and user_feedback.lower() != "r":
-                    formatted_instruction += f"\n\n[Human Operator Guidance]: {user_feedback}"
-
-                retry_count = 0
-
 
 if __name__ == "__main__":
     try:
