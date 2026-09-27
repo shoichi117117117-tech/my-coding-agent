@@ -1,31 +1,84 @@
 import os
+import re
 from datetime import datetime
 from pathlib import Path
 from typing import List, Dict, Any, Optional
 
 
 class ObsidianAdapter:
-    """Safe adapter for reading rules and writing comprehensive logs in an existing PARA Obsidian Vault."""
+    """Safe adapter for reading rules, searching knowledge notes, writing logs, 
+    and saving troubleshooting notes in an existing PARA Obsidian Vault.
+    """
 
     def __init__(self, vault_path: str):
-        """
+        """Initialize the Obsidian adapter with the vault base path.
+
         :param vault_path: Absolute path to your Obsidian Vault.
         """
         self.vault_path = Path(vault_path)
+
+        # Core rule filenames (stored in lowercase for fast matching)
+        self.core_rule_files = {
+            "general_rules.md",
+            "python_style.md",
+        }
+
+        # Keyword mapping for conditional domain-specific rule loading
+        self.domain_keywords = {
+            "http_requests.md": ["http", "api", "request", "rest", "endpoint", "fetch", "axios"],
+            "security_auth.md": ["auth", "security", "token", "jwt", "login", "password", "oauth"],
+            "database.md": ["db", "database", "sql", "sqlite", "orm", "query", "postgres"],
+        }
+
+    def search(self, query: str, max_results: int = 5) -> str:
+        """Search across all Markdown notes in the Obsidian Vault for matching keywords or phrases.
+
+        :param query: Keyword or space-separated search query.
+        :param max_results: Maximum number of note snippets to return.
+        :return: Formatted string containing matching file snippets.
+        """
+        if not self.vault_path.exists():
+            return "Obsidian Vault directory does not exist."
+
+        keywords = [k.lower() for k in query.split() if k.strip()]
+        if not keywords:
+            return "Empty search query provided."
+
+        matches = []
+        for md_file in self.vault_path.rglob("*.md"):
+            # Ignore log files or hidden directories
+            if ".obsidian" in md_file.parts or "50_Logs" in md_file.parts:
+                continue
+
+            try:
+                content = md_file.read_text(encoding="utf-8")
+                content_lower = content.lower()
+
+                # Check if all or any keywords match
+                if any(kw in content_lower for kw in keywords):
+                    rel_path = md_file.relative_to(self.vault_path)
+                    # Extract concise snippet
+                    snippet_lines = [line for line in content.splitlines() if any(kw in line.lower() for kw in keywords)]
+                    snippet = "\n".join(snippet_lines[:5])
+                    matches.append(f"--- Note: [[{rel_path}]] ---\n{snippet}")
+
+                    if len(matches) >= max_results:
+                        break
+            except Exception as e:
+                continue
+
+        if not matches:
+            return f"No relevant notes or guidelines found in Obsidian Vault for query: '{query}'."
+
+        return "\n\n".join(matches)
 
     def read_rules(
         self,
         task_instruction: str = "",
         relative_rules_folder: str = "30_Resources/AgentRules",
     ) -> str:
-        """
-        Read core engineering rules (e.g., general, KISS, SOLID) unconditionally,
-        and append domain-specific rules (e.g., HTTP, Security, Auth) only if matching
-        keywords are found in the task instruction.
-
-        :param task_instruction: User input task string used for keyword detection.
-        :param relative_rules_folder: Path inside Vault where rules are stored.
-        :return: Concatenated Markdown string of relevant rules.
+        """Read core engineering rules unconditionally, and append domain-specific rules
+        only if matching keywords are found in the task instruction.
         """
         target_dir = self.vault_path / relative_rules_folder
 
@@ -38,44 +91,23 @@ class ObsidianAdapter:
                 encoding="utf-8",
             )
 
-        # Always read Core rules 
-        core_rule_files = {
-            "general_rules.md",
-            "python_style.md",
-        }
-
-        # Keyword mapping for conditional domain-specific rule loading
-        domain_keywords = {
-            "http_requests.md": ["http", "api", "request", "rest", "endpoint", "fetch", "axios"],
-            "security_auth.md": ["auth", "security", "token", "jwt", "login", "password", "oauth"],
-            "database.md": ["db", "database", "sql", "sqlite", "orm", "query", "postgres"],
-        }
-
         task_lower = task_instruction.lower()
         rule_texts = []
 
         for md_file in target_dir.glob("*.md"):
             filename = md_file.name.lower()
-
-            # 1. Determine if this file is a domain-specific rule
-            matched_domain_file = None
-            for domain_file in domain_keywords:
-                if domain_file in filename:
-                    matched_domain_file = domain_file
-                    break
-
-            # 2. Filtering logic
             should_include = False
 
-            # Always read core rules
-            if filename in [f.lower() for f in core_rule_files]:
+            # 1. Check if it is a core rule
+            if filename in self.core_rule_files:
                 should_include = True
-                
             else:
-                # Domain rules are included only if task contains relevant keywords
-                keywords = domain_keywords[matched_domain_file]
-                if any(kw in task_lower for kw in keywords):
-                    should_include = True
+                # 2. Check if it matches any registered domain rule pattern
+                for domain_file, keywords in self.domain_keywords.items():
+                    if domain_file in filename:
+                        if any(kw in task_lower for kw in keywords):
+                            should_include = True
+                        break
 
             # 3. Read and append allowed rule files
             if should_include:
@@ -94,15 +126,7 @@ class ObsidianAdapter:
         execution_history: List[Dict[str, Any]],
         relative_log_folder: str = "50_Logs/AgentLogs",
     ) -> Path:
-        """
-        Append detailed execution logs including intermediate attempt errors to Obsidian.
-
-        :param task_description: Description of user task.
-        :param status: Execution status ("SUCCESS" / "FAILED").
-        :param execution_history: List of dicts containing attempt numbers and error details.
-        :param relative_log_folder: Path inside Vault reserved for logs.
-        :return: Path to updated log file.
-        """
+        """Append detailed execution logs including intermediate attempt errors to Obsidian."""
         target_dir = self.vault_path / relative_log_folder
         target_dir.mkdir(parents=True, exist_ok=True)
 
@@ -125,7 +149,7 @@ class ObsidianAdapter:
             output = item.get("output", "").strip()
 
             icon = "✅ Pass" if is_pass else "❌ Error"
-            log_entry.append(f"<details><summary>Attempt {attempt_num}: {icon}</summary>\n")
+            log_entry.append(f"<details>\n<summary>Attempt {attempt_num}: {icon}</summary>\n")
             log_entry.append(f"```text\n{output if output else 'No output returned.'}\n```")
             log_entry.append("\n</details>\n")
 
@@ -139,3 +163,36 @@ class ObsidianAdapter:
             f.write("\n".join(log_entry) + "\n")
 
         return log_file_path
+
+    def save_troubleshooting_note(
+        self,
+        title: str,
+        content: str,
+        relative_folder: str = "30_Resources/Troubleshooting",
+    ) -> Path:
+        """Saves a troubleshooting markdown note into the designated Vault directory.
+
+        :param title: Clean title of the note for file naming.
+        :param content: Full Markdown content with YAML frontmatter.
+        :param relative_folder: Relative path inside Obsidian Vault.
+        :return: Absolute Path object of the saved file.
+        """
+        target_dir = self.vault_path / relative_folder
+        target_dir.mkdir(parents=True, exist_ok=True)
+
+        date_prefix = datetime.now().strftime("%Y-%m-%d")
+        
+        # Clean title for safe filesystem naming
+        clean_title = re.sub(r"[^\w\s-]", "", title).strip().replace(" ", "_")
+        clean_title = re.sub(r"_+", "_", clean_title)
+        filename = f"{date_prefix}_{clean_title}.md"
+
+        # Clean content from surrounding markdown code blocks if agent wrapped entire note
+        cleaned_content = content.strip()
+        match = re.search(r"^```(?:markdown)?\s*([\s\S]*?)\s*```$", cleaned_content, re.IGNORECASE)
+        if match:
+            cleaned_content = match.group(1).strip()
+
+        file_path = target_dir / filename
+        file_path.write_text(cleaned_content, encoding="utf-8")
+        return file_path
