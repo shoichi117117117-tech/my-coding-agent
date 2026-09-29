@@ -1,19 +1,28 @@
+"""Base Agent module handling LLM call abstractions, multi-provider fallback routing, and native SDK adapters."""
+
 import logging
 import time
-from typing import List, Dict, Any, Optional
+from typing import Any, Dict, List, Optional
+
+import litellm
 from google import genai
 from google.genai import types
-from openai import OpenAI  # Import standard OpenAI client for GitHub Models
-import litellm
 
 from config import Config
 
-logger = logging.getLogger(__name__)
+# Configure structured root logging format
+logging.basicConfig(
+    level=logging.INFO,
+    format="%(asctime)s [%(name)s] %(levelname)s: %(message)s",
+    datefmt="%H:%M:%S",
+)
+
+logger = logging.getLogger("BaseAgent")
 litellm.suppress_debug_info = True
 
 
 def extract_response_content(response: Any) -> str:
-    """Extract pure string content cleanly from various LLM response objects or providers."""
+    """Extract string content cleanly from various LLM response objects across different SDKs."""
     if isinstance(response, str):
         return response
 
@@ -38,63 +47,38 @@ def extract_response_content(response: Any) -> str:
 
 
 class BaseAgent:
-    """Base Agent class handling multi-provider LLM calls (GitHub Models -> Gemini -> Groq -> OpenRouter)
-    with automatic failover/fallback logic.
-    """
+    """Base Agent providing multi-provider model routing, fallback execution pipelines, and exponential backoff retries."""
 
     def __init__(
         self,
         name: str,
         system_prompt: str,
+        role: Optional[str] = None,
         model_fallback_list: Optional[List[str]] = None,
-    ):
+    ) -> None:
+        """Initialize base agent configurations and model execution pipelines."""
         self.name = name
         self.system_prompt = system_prompt
+        self.role = role.lower() if role else name.lower()
 
-        # Native Gemini Client Initialization
-        self.gemini_client = None
+        # Native Gemini client initialization
+        self.gemini_client: Optional[genai.Client] = None
         if getattr(Config, "GEMINI_API_KEY", None):
             self.gemini_client = genai.Client(api_key=Config.GEMINI_API_KEY)
 
-        # Native GitHub Models Client Initialization (OpenAI SDK Compatible Endpoint)
-        self.github_client = None
-        if getattr(Config, "GITHUB_API_KEY", None):
-            self.github_client = OpenAI(
-                base_url=Config.GITHUB_MODELS_BASE_URL,
-                api_key=Config.GITHUB_API_KEY,
-            )
+        # Build execution pipeline prioritizing assigned role model
+        pipeline: List[str] = []
+        if self.role in Config.AGENT_MODEL_CONFIG:
+            primary_model = Config.AGENT_MODEL_CONFIG[self.role]
+            pipeline.append(primary_model)
 
-        # Retrieve model pipeline from Config or custom list
-        self.model_pipeline = Config.get_model_fallbacks(model_fallback_list)
+        default_fallbacks = Config.get_model_fallbacks(model_fallback_list)
+        for model in default_fallbacks:
+            if model not in pipeline:
+                pipeline.append(model)
 
-    def _call_github_models_native(
-        self,
-        model: str,
-        messages: List[Dict[str, Any]],
-        tools: Optional[List[Dict[str, Any]]] = None,
-        response_format: Optional[Dict[str, Any]] = None,
-    ) -> Any:
-        """Call GitHub Models API directly using standard OpenAI SDK client."""
-        if not self.github_client:
-            raise ValueError("GITHUB_API_KEY is not configured in Config.")
-
-        actual_model_name = model.replace("github/", "")
-        full_messages = [{"role": "system", "content": self.system_prompt}] + messages
-
-        kwargs: Dict[str, Any] = {
-            "model": actual_model_name,
-            "messages": full_messages,
-            "temperature": 0.2,
-        }
-
-        if tools:
-            kwargs["tools"] = tools
-            kwargs["tool_choice"] = "auto"
-
-        if response_format:
-            kwargs["response_format"] = response_format
-
-        return self.github_client.chat.completions.create(**kwargs)
+        self.model_pipeline = pipeline
+        logger.info(f"[{self.name}] Initialized model pipeline: {self.model_pipeline}")
 
     def _call_gemini_native(
         self,
@@ -103,11 +87,16 @@ class BaseAgent:
         tools: Optional[List[Dict[str, Any]]] = None,
         response_format: Optional[Dict[str, Any]] = None,
     ) -> Any:
+        """Execute request using Google GenAI SDK natively."""
         if not self.gemini_client:
-            raise ValueError("GEMINI_API_KEY is not set.")
+            raise ValueError("GEMINI_API_KEY is not configured.")
 
         user_content = "\n".join([m.get("content", "") for m in messages if m.get("content")])
-        mime_type = "application/json" if response_format and response_format.get("type") == "json_object" else "text/plain"
+        mime_type = (
+            "application/json"
+            if response_format and response_format.get("type") == "json_object"
+            else "text/plain"
+        )
 
         config = types.GenerateContentConfig(
             system_instruction=self.system_prompt,
@@ -122,11 +111,11 @@ class BaseAgent:
         )
 
         class MockChoice:
-            def __init__(self, text):
+            def __init__(self, text: str) -> None:
                 self.message = type("Message", (), {"content": text, "tool_calls": None})()
 
         class MockResponse:
-            def __init__(self, text):
+            def __init__(self, text: str) -> None:
                 self.choices = [MockChoice(text)]
 
         return MockResponse(response.text or "Task executed successfully.")
@@ -138,6 +127,7 @@ class BaseAgent:
         tools: Optional[List[Dict[str, Any]]] = None,
         response_format: Optional[Dict[str, Any]] = None,
     ) -> Any:
+        """Execute request using LiteLLM unified completion endpoint."""
         full_messages = [{"role": "system", "content": self.system_prompt}] + messages
 
         kwargs: Dict[str, Any] = {
@@ -145,6 +135,9 @@ class BaseAgent:
             "messages": full_messages,
             "temperature": 0.2,
         }
+
+        if model.startswith("openrouter/") and getattr(Config, "OPENROUTER_API_KEY", None):
+            kwargs["api_key"] = Config.OPENROUTER_API_KEY
 
         if tools:
             kwargs["tools"] = tools
@@ -161,42 +154,38 @@ class BaseAgent:
         tools: Optional[List[Dict[str, Any]]] = None,
         response_format: Optional[Dict[str, Any]] = None,
     ) -> Any:
-        """Executes LLM call trying models in sequence."""
-        last_error = None
+        """Execute completion calls sequentially across model pipeline with retry backoff."""
+        last_error: Optional[Exception] = None
 
-        for model in self.model_pipeline:
+        for idx, model in enumerate(self.model_pipeline):
             try:
-                if model.startswith("github/"):
-                    logger.info(f"[{self.name}] Calling GitHub Models API directly: {model}")
-                    return self._call_github_models_native(
-                        model=model,
-                        messages=messages,
-                        tools=tools,
-                        response_format=response_format,
-                    )
-                elif model.startswith("gemini/") or model.startswith("gemini-"):
-                    logger.info(f"[{self.name}] Calling Native Gemini model: {model}")
+                logger.info(f"[{self.name}] 🤖 Executing request via model: [{model}]")
+
+                if model.startswith("gemini/") or model.startswith("gemini-"):
                     return self._call_gemini_native(
                         model=model,
                         messages=messages,
                         tools=tools,
                         response_format=response_format,
                     )
-                else:
-                    logger.info(f"[{self.name}] Provider Switch: Calling [{model}] via LiteLLM...")
-                    return self._call_litellm_provider(
-                        model=model,
-                        messages=messages,
-                        tools=tools,
-                        response_format=response_format,
-                    )
+                return self._call_litellm_provider(
+                    model=model,
+                    messages=messages,
+                    tools=tools,
+                    response_format=response_format,
+                )
 
             except Exception as e:
+                err_msg = str(e)
                 logger.warning(
-                    f"[{self.name}] Model/Provider [{model}] failed ({str(e)[:100]}...). Switching fallback..."
+                    f"[{self.name}] ⚠️ Model [{model}] failed ({err_msg[:100]}...). Initiating fallback..."
                 )
                 last_error = e
-                time.sleep(1)
+
+                wait_time = min(2 ** (idx + 1), 8)
+                time.sleep(wait_time)
                 continue
 
-        raise RuntimeError(f"❌ All AI Providers failed for Agent [{self.name}]. Last Error: {last_error}")
+        raise RuntimeError(
+            f"❌ All configured AI providers failed for Agent [{self.name}]. Last Error: {last_error}"
+        )

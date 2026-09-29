@@ -1,15 +1,16 @@
+"""Tester Agent module responsible for automated test generation, RCA diagnosis, and Obsidian knowledge archiving."""
+
 import json
-import logging
 import re
 import textwrap
 from datetime import datetime
 from pathlib import Path
-from typing import List, Dict, Any, Optional
+from typing import Any, Dict, List, Optional
+
 from agents.base import BaseAgent, extract_response_content
 from tools.code_editor import CodeEditor
 from tools.obsidian import ObsidianAdapter
-
-logger = logging.getLogger(__name__)
+from utils.ui import AgentLogger
 
 TESTER_SYSTEM_PROMPT = """You are the Lead QA & Knowledge Engineer (Tester Agent) responsible for inspecting code, generating test suites, analyzing execution logic, and providing diagnostic RCA feedback for the Planner Agent.
 
@@ -104,7 +105,7 @@ TESTER_TOOLS = [
                         "description": "Full Markdown or code content to write",
                     },
                 },
-                "required": ["file_path", "content"],
+                "required": ["file_path"],
             },
         },
     },
@@ -129,21 +130,21 @@ TESTER_TOOLS = [
 
 
 class TesterAgent(BaseAgent):
-    """Tester Agent responsible for inspecting implementations, writing test suites,
-    providing diagnostic feedback for Planner, and generating Obsidian knowledge notes.
-    """
+    """Tester Agent providing unit test generation, RCA reports, and troubleshooting note creation."""
 
     def __init__(
         self,
         workspace_root: Optional[str] = None,
         obsidian_vault_path: Optional[str] = None,
         model_fallback_list: Optional[List[str]] = None,
-    ):
+    ) -> None:
+        """Initialize TesterAgent with workspace tools and obsidian integration."""
         self.workspace_root = Path(workspace_root).resolve() if workspace_root else None
         self.obsidian_vault_path = Path(obsidian_vault_path).resolve() if obsidian_vault_path else None
 
         self.code_editor = CodeEditor(workspace_root=str(self.workspace_root)) if self.workspace_root else None
         self.obsidian_adapter = ObsidianAdapter(str(self.obsidian_vault_path)) if self.obsidian_vault_path else None
+        self.ui_logger = AgentLogger("Tester")
 
         formatted_system_prompt = TESTER_SYSTEM_PROMPT.format(
             workspace_root=str(self.workspace_root) if self.workspace_root else "Not specified",
@@ -153,11 +154,12 @@ class TesterAgent(BaseAgent):
         super().__init__(
             name="Tester",
             system_prompt=formatted_system_prompt,
+            role="tester",
             model_fallback_list=model_fallback_list,
         )
 
     def extract_pure_code(self, raw_text: str) -> str:
-        """Extract pure code from response stripping markdown triple backticks if present."""
+        """Extract pure code string by removing markdown backtick code blocks."""
         text = raw_text.strip()
         match = re.search(r"```(?:\w+)?\s*([\s\S]*?)\s*```", text, re.IGNORECASE)
         if match:
@@ -171,7 +173,8 @@ class TesterAgent(BaseAgent):
         test_requirements: str = "",
         auto_fetch_vault_rules: bool = True,
     ) -> str:
-        """Generates appropriate unit test code for a given source file with Obsidian Vault awareness."""
+        """Generate automated unit test code targeting specified codebase files."""
+        self.ui_logger.start_action(f"Generating test suite for target file: '{target_file}'...")
         vault_rules_context = ""
         if auto_fetch_vault_rules and self.obsidian_adapter:
             vault_rules_context = self.obsidian_adapter.read_rules(task_instruction=test_requirements)
@@ -186,27 +189,29 @@ class TesterAgent(BaseAgent):
         )
 
         messages = [{"role": "user", "content": user_prompt}]
-        logger.info(f"[Tester] Generating test code for {target_file}...")
         response = self.call_llm(messages=messages)
         raw_content = extract_response_content(response)
-        return self.extract_pure_code(raw_content)
+        test_code = self.extract_pure_code(raw_content)
+
+        self.ui_logger.stop_action(f"Unit test code generated successfully for '{target_file}'.")
+        return test_code
 
     def _execute_tool_call(self, tool_call: Any) -> str:
-        """Helper to dispatch tool execution to ObsidianAdapter or instance-bound CodeEditor methods."""
+        """Execute dispatched tool actions for file manipulation and vault retrieval."""
         func_name = tool_call.function.name
         try:
             args = json.loads(tool_call.function.arguments)
         except Exception as e:
             return f"Error parsing arguments: {e}"
 
-        # Dispatch Obsidian Vault Search Tool
+        target_summary = args.get("file_path") or args.get("query") or ""
+        self.ui_logger.tool_call(func_name, target_summary)
+
         if func_name == "search_obsidian_vault":
             if not self.obsidian_adapter:
                 return "Error: Obsidian Vault adapter is not configured."
-            query = args.get("query", "")
-            return self.obsidian_adapter.search(query=query)
+            return self.obsidian_adapter.search(query=args.get("query", ""))
 
-        # Dispatch Workspace CodeEditor Tools
         if not self.code_editor:
             return "Error: CodeEditor is not initialized."
 
@@ -220,7 +225,7 @@ class TesterAgent(BaseAgent):
             result = tool_method(**args)
             return str(result)
         except Exception as e:
-            logger.error(f"[Tester Tool Execution Error] {func_name}: {e}")
+            self.ui_logger.error(f"Tool execution failed [{func_name}]: {e}")
             return f"Error executing {func_name}: {e}"
 
     def execute_task(
@@ -232,7 +237,7 @@ class TesterAgent(BaseAgent):
         max_tool_iterations: int = 5,
         auto_fetch_vault_rules: bool = True,
     ) -> Any:
-        """Executes a diagnostic and verification task for target code using dynamic tool calls."""
+        """Perform diagnostic RCA or verification task using tool calls."""
         messages = list(history) if history else []
 
         vault_rules_context = ""
@@ -264,7 +269,7 @@ class TesterAgent(BaseAgent):
         user_message = "\n\n".join(user_message_parts)
         messages.append({"role": "user", "content": user_message})
 
-        logger.info(f"[Tester] Processing verification task: {task_description[:50]}...")
+        self.ui_logger.start_action(f"Running verification & diagnosis: {task_description[:50]}...")
 
         for iteration in range(max_tool_iterations):
             response = self.call_llm(messages=messages, tools=TESTER_TOOLS)
@@ -277,10 +282,10 @@ class TesterAgent(BaseAgent):
             messages.append(msg_dict)
 
             if not hasattr(message, "tool_calls") or not message.tool_calls:
+                self.ui_logger.stop_action("Verification task completed.")
                 return raw_content
 
             for tool_call in message.tool_calls:
-                logger.info(f"[Tester] Tool Call requested: {tool_call.function.name}")
                 tool_result = self._execute_tool_call(tool_call)
                 messages.append({
                     "role": "tool",
@@ -288,6 +293,7 @@ class TesterAgent(BaseAgent):
                     "content": tool_result,
                 })
 
+        self.ui_logger.stop_action("Verification task completed after tool iterations.")
         return response
 
     def generate_obsidian_troubleshooting_note(
@@ -298,7 +304,8 @@ class TesterAgent(BaseAgent):
         save_to_vault: bool = True,
         relative_folder: str = "30_Resources/Troubleshooting",
     ) -> str:
-        """Generates structured Markdown note for troubleshooting and archives to Obsidian Vault deterministically."""
+        """Generate structured Markdown troubleshooting note and save to Obsidian Vault."""
+        self.ui_logger.start_action(f"Archiving troubleshooting knowledge note: '{error_title}'...")
         today_str = datetime.now().strftime("%Y-%m-%d")
 
         user_prompt = (
@@ -317,12 +324,10 @@ class TesterAgent(BaseAgent):
         response = self.call_llm(messages=messages)
         body_content = extract_response_content(response).strip()
 
-        # Clean outer markdown code block wrapper if the LLM wrapped the whole response in markdown block
         match = re.search(r"^```(?:markdown)?\s*([\s\S]*?)\s*```$", body_content, re.IGNORECASE)
         if match:
             body_content = match.group(1).strip()
 
-        # Construct deterministic Obsidian note with textwrap.dedent to ensure frontmatter starts at line 1 column 1
         markdown_content = textwrap.dedent(f"""\
             ---
             type: troubleshooting
@@ -349,8 +354,8 @@ class TesterAgent(BaseAgent):
                     content=markdown_content,
                     relative_folder=relative_folder,
                 )
-                logger.info(f"[Tester] Troubleshooting note automatically saved to Vault: {saved_path}")
+                self.ui_logger.stop_action(f"Note successfully archived to Vault at: '{saved_path}'")
             except Exception as e:
-                logger.error(f"[Tester] Failed to save note to Obsidian Vault: {e}")
+                self.ui_logger.error(f"Failed to save note to Obsidian Vault: {e}")
 
         return markdown_content

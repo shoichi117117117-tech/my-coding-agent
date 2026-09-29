@@ -1,6 +1,6 @@
 import os
 from pathlib import Path
-from typing import List, Optional
+from typing import Dict, List, Optional
 
 from dotenv import load_dotenv
 
@@ -9,27 +9,35 @@ load_dotenv()
 
 
 class Config:
-    """Central configuration class for the coding agent."""
+    """Central configuration class for the coding agent system."""
 
     # Multi-provider API keys
-    GEMINI_API_KEY: str = os.getenv("GEMINI_API_KEY", "")
-    GROQ_API_KEY: str = os.getenv("GROQ_API_KEY", "")
     OPENROUTER_API_KEY: str = os.getenv("OPENROUTER_API_KEY", "")
+    GROQ_API_KEY: str = os.getenv("GROQ_API_KEY", "")
+    GEMINI_API_KEY: str = os.getenv("GEMINI_API_KEY", "")
     OPENAI_API_KEY: str = os.getenv("OPENAI_API_KEY", "")
-    GITHUB_API_KEY: str = os.getenv("GITHUB_API_KEY", "")
-
-    # GitHub Models API Base Endpoint (Azure Inference API)
-    GITHUB_MODELS_BASE_URL: str = "https://models.inference.ai.azure.com"
 
     # Paths & execution settings
     OBSIDIAN_VAULT_PATH: Path = Path(os.getenv("OBSIDIAN_VAULT_PATH", "./mock_vault"))
     MAX_RETRIES: int = int(os.getenv("MAX_RETRIES", "3"))
 
-    # LiteLLM model identifiers for GitHub Models and fallback providers.
+    # Role-specific primary models (OpenRouter)
+    # Planner: Fast, highly structured output, context aware
+    # Coder: High coding benchmark (DeepSeek V3), cost-effective
+    # Tester: Fast, strict JSON/tool output
+    AGENT_MODEL_CONFIG: Dict[str, str] = {
+        "planner": os.getenv("PLANNER_MODEL", "openrouter/openai/gpt-4o-mini"),
+        "coder": os.getenv("CODER_MODEL", "openrouter/deepseek/deepseek-chat"),
+        "tester": os.getenv("TESTER_MODEL", "openrouter/openai/gpt-4o-mini"),
+    }
+
+    # Default model pipeline for fallbacks (OpenRouter -> Groq -> Gemini)
     DEFAULT_MODEL_FALLBACKS: List[str] = [
+        "openrouter/openai/gpt-4o-mini",
+        "openrouter/deepseek/deepseek-chat",
+        "openrouter/meta-llama/llama-3.3-70b-instruct",
         "groq/openai/gpt-oss-120b",
         "groq/openai/gpt-oss-20b",
-        "groq/qwen/qwen3.8-27b",
     ]
 
     @classmethod
@@ -54,9 +62,10 @@ class Config:
             return ""
 
         aliases = {
-            "gpt-4o-mini": "github/gpt-4o-mini",
-            "gpt-4o": "github/gpt-4o",
-            "llama-3.3-70b": "github/meta-llama-3.3-70b-instruct",
+            "gpt-4o-mini": "openrouter/openai/gpt-4o-mini",
+            "gpt-4o": "openrouter/openai/gpt-4o",
+            "deepseek-chat": "openrouter/deepseek/deepseek-chat",
+            "llama-3.3-70b": "openrouter/meta-llama/llama-3.3-70b-instruct",
         }
         return aliases.get(cleaned.lower(), cleaned)
 
@@ -64,11 +73,10 @@ class Config:
     def has_any_api_key(cls) -> bool:
         """Return whether at least one provider credential is configured."""
         return bool(
-            cls.GEMINI_API_KEY
+            cls.OPENROUTER_API_KEY
             or cls.GROQ_API_KEY
-            or cls.OPENROUTER_API_KEY
+            or cls.GEMINI_API_KEY
             or cls.OPENAI_API_KEY
-            or cls.GITHUB_API_KEY
         )
 
     @classmethod
@@ -76,6 +84,5 @@ class Config:
         """Validate that at least one AI provider API key is present."""
         if not cls.has_any_api_key():
             raise ValueError(
-                "No API keys found. Please set at least one of "
-                "GEMINI_API_KEY, GROQ_API_KEY, OPENROUTER_API_KEY, OPENAI_API_KEY, or GITHUB_API_KEY in your .env file."
+                "No API keys found. Please set at least OPENROUTER_API_KEY or GROQ_API_KEY in your .env file."
             )

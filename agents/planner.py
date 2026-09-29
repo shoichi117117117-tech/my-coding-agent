@@ -1,13 +1,14 @@
+"""Planner Agent module responsible for architecture decomposition, verification strategy planning, and project naming."""
+
 import json
-import logging
 import re
 from datetime import datetime
 from pathlib import Path
-from typing import List, Dict, Any, Optional, Union
+from typing import Any, Dict, List, Optional, Union
+
 from agents.base import BaseAgent, extract_response_content
 from tools.obsidian import ObsidianAdapter
-
-logger = logging.getLogger(__name__)
+from utils.ui import AgentLogger
 
 PLANNER_SYSTEM_PROMPT = """You are the Lead Software Architect and Planner Agent responsible for analyzing user requests, breaking down complex software development tasks into structured sequential steps, diagnosing runtime/terminal errors, and suggesting clean directory architectures and verification strategies.
 
@@ -71,19 +72,19 @@ Strict Rules:
 
 
 class PlannerAgent(BaseAgent):
-    """Planner Agent that decomposes high-level requests into actionable sub-tasks,
-    infers verification strategies, generates rescue plans from terminal errors, and integrates with Obsidian Vault.
-    """
+    """Planner Agent decomposing high-level specifications into JSON plans and analyzing strategies."""
 
     def __init__(
         self,
         workspace_root: Optional[str] = None,
         obsidian_vault_path: Optional[str] = None,
         model_fallback_list: Optional[List[str]] = None,
-    ):
+    ) -> None:
+        """Initialize PlannerAgent with workspace paths and tools."""
         self.workspace_root = Path(workspace_root).resolve() if workspace_root else None
         self.obsidian_vault_path = Path(obsidian_vault_path).resolve() if obsidian_vault_path else None
         self.obsidian_adapter = ObsidianAdapter(str(self.obsidian_vault_path)) if self.obsidian_vault_path else None
+        self.ui_logger = AgentLogger("Planner")
 
         formatted_system_prompt = PLANNER_SYSTEM_PROMPT.format(
             workspace_root=str(self.workspace_root) if self.workspace_root else "Not specified",
@@ -93,11 +94,12 @@ class PlannerAgent(BaseAgent):
         super().__init__(
             name="Planner",
             system_prompt=formatted_system_prompt,
+            role="planner",
             model_fallback_list=model_fallback_list,
         )
 
     def _clean_json_response(self, raw_content: str) -> str:
-        """Helper method to extract a clean JSON string from raw LLM responses using regex."""
+        """Extract a clean JSON string from raw LLM text using regex matching."""
         content = raw_content.strip()
         match = re.search(r"```(?:json)?\s*([\s\S]*?)\s*```", content, re.IGNORECASE)
         if match:
@@ -105,7 +107,8 @@ class PlannerAgent(BaseAgent):
         return content
 
     def suggest_project_structure(self, task_instruction: str) -> Dict[str, str]:
-        """Infers clean project directory name (lower_snake_case) and main target filename based on user task."""
+        """Infer clean lower_snake_case folder name and main target filename from user task."""
+        self.ui_logger.start_action("Analyzing request to suggest project structure & folder name...")
         clean_instruction = re.sub(r"\s+", " ", task_instruction).strip()
         short_task = clean_instruction[:500]
 
@@ -135,14 +138,12 @@ class PlannerAgent(BaseAgent):
             raw_folder = parsed.get("folder_name", "")
             raw_main = parsed.get("main_file", "")
 
-            # Convert spaces/hyphens to underscores and sanitize string strictly for valid lower_snake_case folder names
             folder = raw_folder.lower().replace(" ", "_").replace("-", "_")
             folder = re.sub(r"[^a-z0-9_]", "", folder)
             folder = re.sub(r"_+", "_", folder).strip("_")
 
             main_file = re.sub(r"[^\w\.-]", "", raw_main).strip()
 
-            # Guard against fallback or overly generic folder names
             generic_names = {"generated_project", "my_project", "project", "app", "python_project", "test_project"}
             if not folder or folder in generic_names:
                 words = re.findall(r"\b[a-zA-Z]{3,}\b", short_task.lower())
@@ -152,34 +153,32 @@ class PlannerAgent(BaseAgent):
                 else:
                     folder = f"project_{fallback_timestamp}"
 
-            return {
-                "folder_name": folder,
-                "main_file": main_file if main_file else "main.py",
-            }
+            folder_result = folder
+            main_result = main_file if main_file else "main.py"
+            self.ui_logger.stop_action(f"Suggested structure: folder='{folder_result}', main_file='{main_result}'")
+            return {"folder_name": folder_result, "main_file": main_result}
+
         except Exception as e:
-            logger.warning(f"[Planner] Could not parse structure suggestion ({e}), falling back to timestamped directory.")
-            return {"folder_name": f"project_{fallback_timestamp}", "main_file": "main.py"}
+            fallback_folder = f"project_{fallback_timestamp}"
+            self.ui_logger.warning(f"Failed to infer structure ({e}). Fallback folder: '{fallback_folder}'")
+            return {"folder_name": fallback_folder, "main_file": "main.py"}
 
     def suggest_project_folder(self, task_instruction: str) -> str:
-        """Extract folder name from project structure suggestion."""
+        """Extract workspace folder name from project structure suggestion."""
         structure = self.suggest_project_structure(task_instruction)
         return structure.get("folder_name", f"project_{datetime.now().strftime('%Y%m%d_%H%M%S')}")
 
     def analyze_verification_strategy(self, task_instruction: str) -> Dict[str, Optional[str]]:
-        """Dynamically analyzes the task requirement and determines the appropriate verification strategy."""
+        """Dynamically analyze project requirements to deduce automated verification command and mode."""
+        self.ui_logger.start_action("Determining project verification strategy...")
         structure = self.suggest_project_structure(task_instruction)
         target_file = structure.get("main_file", "main.py")
 
         prompt = (
             f"Task Instruction: {task_instruction}\n"
             f"Primary Target File: {target_file}\n\n"
-            "Analyze the nature of this project (e.g., Python backend, React/Node.js frontend, Java Maven/Gradle, Rust CLI, or static HTML/CSS).\n"
-            "Determine the verification mode and appropriate terminal verification command.\n\n"
-            "Modes:\n"
-            "- 'unit_test': Requires generating unit tests (e.g., pytest, jest, junit, cargo test). Note: Python test files MUST be placed under `tests/`.\n"
-            "- 'build_or_lint': For compiled or bundled projects requiring build validation (e.g., `npm run build`, `mvn compile`).\n"
-            "- 'direct_execution': Directly execute script to verify no runtime syntax errors (e.g., `uv run python main.py`, `node index.js`).\n"
-            "- 'none': Pure documentation or static assets.\n\n"
+            "Analyze project nature and determine verification mode and command.\n"
+            "Modes: 'unit_test', 'build_or_lint', 'direct_execution', 'none'.\n\n"
             "Respond ONLY in valid JSON:\n"
             "{\n"
             '  "target_file": "main.py",\n'
@@ -198,19 +197,19 @@ class PlannerAgent(BaseAgent):
             cleaned_str = self._clean_json_response(raw_content)
             parsed = json.loads(cleaned_str)
 
-            return {
+            res = {
                 "target_file": parsed.get("target_file", target_file),
                 "test_file": parsed.get("test_file"),
                 "test_command": parsed.get("test_command"),
                 "mode": parsed.get("mode", "direct_execution"),
             }
+            self.ui_logger.stop_action(f"Verification mode selected: '{res['mode']}' using command: '{res['test_command']}'")
+            return res
         except Exception as e:
-            logger.warning(f"[Planner] Failed to infer verification strategy ({e}). Using default fallback strategy.")
-
+            self.ui_logger.warning(f"Strategy analysis error ({e}). Using default fallback strategy.")
             stem = Path(target_file).stem
             test_file = f"tests/test_{stem}.py" if target_file.endswith(".py") else None
             test_command = f"uv run pytest {test_file}" if test_file else f"python {target_file}"
-
             return {
                 "target_file": target_file,
                 "test_file": test_file,
@@ -227,14 +226,17 @@ class PlannerAgent(BaseAgent):
         attempt: int = 1,
         auto_fetch_vault_rules: bool = True,
     ) -> Union[List[Dict[str, Any]], str]:
-        """Creates a structured JSON execution or rescue plan based on instructions, domain rules, and error context."""
+        """Formulate a structured JSON execution or rescue plan."""
         if auto_fetch_vault_rules and self.obsidian_adapter:
+            self.ui_logger.start_action("Searching Obsidian Vault for active rules...")
             vault_rules = self.obsidian_adapter.read_rules(task_instruction=task_instruction)
             active_rules = f"{domain_rules}\n\n{vault_rules}".strip()
+            self.ui_logger.stop_action("Retrieved Obsidian rules successfully.")
         else:
             active_rules = domain_rules.strip() if domain_rules else "No specific rules provided."
 
         if error_context:
+            self.ui_logger.start_action(f"Formulating Rescue Plan (Attempt #{attempt})...")
             formatted_user_message = (
                 f"【ATTEMPT #{attempt} FAILED】\n"
                 f"Target File: {target_file}\n"
@@ -244,15 +246,14 @@ class PlannerAgent(BaseAgent):
                 f"【Active Development Rules】\n{active_rules}\n\n"
                 "Please perform a Root Cause Analysis and output a JSON execution plan (Rescue Plan) for Coder/Tester."
             )
-            logger.info(f"[Planner] Generating JSON Rescue Plan for attempt #{attempt}...")
         else:
+            self.ui_logger.start_action("Decomposing request into structured execution steps...")
             formatted_user_message = (
                 f"【Target File】: {target_file}\n"
                 f"【Active Development Rules】\n{active_rules}\n\n"
                 f"【User Request】\n{task_instruction}\n\n"
                 "Please output a structured JSON execution plan for this task."
             )
-            logger.info("[Planner] Generating task decomposition plan...")
 
         messages = [{"role": "user", "content": formatted_user_message}]
 
@@ -261,14 +262,13 @@ class PlannerAgent(BaseAgent):
             response_format={"type": "json_object"},
         )
         raw_content = extract_response_content(response)
-
         cleaned_json_str = self._clean_json_response(raw_content)
 
         try:
             parsed_plan = json.loads(cleaned_json_str)
             steps = parsed_plan.get("steps", [])
-            logger.info(f"[Planner] Plan successfully generated with {len(steps)} steps.")
+            self.ui_logger.stop_action(f"Plan generated successfully with {len(steps)} sub-tasks.")
             return json.dumps(parsed_plan, indent=2, ensure_ascii=False)
         except json.JSONDecodeError as e:
-            logger.error(f"[Planner] Failed to parse JSON plan output: {e}\nRaw output:\n{raw_content}")
+            self.ui_logger.error(f"Failed to parse JSON plan output: {e}")
             return cleaned_json_str

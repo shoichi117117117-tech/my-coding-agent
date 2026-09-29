@@ -1,13 +1,14 @@
+"""Coder Agent module responsible for writing source code and managing project manifests across stacks."""
+
 import json
-import logging
 import re
 from pathlib import Path
-from typing import List, Dict, Any, Optional
+from typing import Any, Dict, List, Optional
+
 from agents.base import BaseAgent, extract_response_content
 from tools.code_editor import CodeEditor
 from tools.obsidian import ObsidianAdapter
-
-logger = logging.getLogger(__name__)
+from utils.ui import AgentLogger
 
 CODER_SYSTEM_PROMPT = """You are the Coder Agent responsible for implementing, refactoring, and maintaining production-grade code and project configuration files across workspace files.
 
@@ -152,19 +153,21 @@ CODER_TOOLS = [
 
 
 class CoderAgent(BaseAgent):
-    """Generic Coder Agent responsible for writing code and project configs across language stacks."""
+    """Coder Agent responsible for writing source code and project configuration manifests."""
 
     def __init__(
         self,
         workspace_root: Optional[str] = None,
         obsidian_vault_path: Optional[str] = None,
         model_fallback_list: Optional[List[str]] = None,
-    ):
+    ) -> None:
+        """Initialize CoderAgent with file editor and vault tools."""
         self.workspace_root = Path(workspace_root).resolve() if workspace_root else Path.cwd()
         self.obsidian_vault_path = Path(obsidian_vault_path).resolve() if obsidian_vault_path else None
 
         self.code_editor = CodeEditor(workspace_root=str(self.workspace_root))
         self.obsidian_adapter = ObsidianAdapter(str(self.obsidian_vault_path)) if self.obsidian_vault_path else None
+        self.ui_logger = AgentLogger("Coder")
 
         formatted_system_prompt = CODER_SYSTEM_PROMPT.format(
             workspace_root=str(self.workspace_root),
@@ -174,11 +177,12 @@ class CoderAgent(BaseAgent):
         super().__init__(
             name="Coder",
             system_prompt=formatted_system_prompt,
+            role="coder",
             model_fallback_list=model_fallback_list,
         )
 
     def extract_pure_code(self, raw_text: str) -> str:
-        """Extract pure code content stripping markdown triple backticks if present."""
+        """Extract clean code string stripping markdown code block delimiters."""
         text = raw_text.strip()
         match = re.search(r"```(?:\w+)?\s*([\s\S]*?)\s*```", text, re.IGNORECASE)
         if match:
@@ -186,21 +190,21 @@ class CoderAgent(BaseAgent):
         return text
 
     def _execute_tool_call(self, tool_call: Any) -> str:
-        """Helper method to dispatch tool execution directly to instance methods."""
+        """Dispatch function calls to Obsidian adapter or CodeEditor tool methods."""
         func_name = tool_call.function.name
         try:
             args = json.loads(tool_call.function.arguments)
         except Exception as e:
             return f"Error parsing arguments: {e}"
 
-        # Dispatch Obsidian Vault Search Tool
+        target_summary = args.get("file_path") or args.get("query") or args.get("dir_path") or ""
+        self.ui_logger.tool_call(func_name, target_summary)
+
         if func_name == "search_obsidian_vault":
             if not self.obsidian_adapter:
                 return "Error: Obsidian Vault adapter is not configured."
-            query = args.get("query", "")
-            return self.obsidian_adapter.search(query=query)
+            return self.obsidian_adapter.search(query=args.get("query", ""))
 
-        # Dispatch Workspace CodeEditor Tools
         tool_method = getattr(self.code_editor, func_name, None)
         if not tool_method:
             return f"Error: Tool '{func_name}' is not recognized or supported."
@@ -211,7 +215,7 @@ class CoderAgent(BaseAgent):
             result = tool_method(**args)
             return str(result)
         except Exception as e:
-            logger.error(f"[Coder Tool Execution Error] {func_name}: {e}")
+            self.ui_logger.error(f"Tool execution failed [{func_name}]: {e}")
             return f"Error executing {func_name}: {e}"
 
     def execute_task(
@@ -223,10 +227,9 @@ class CoderAgent(BaseAgent):
         max_tool_iterations: int = 5,
         auto_fetch_vault_rules: bool = True,
     ) -> Any:
-        """Executes coding or configuration sub-tasks using dynamic tool calls and Obsidian knowledge retrieval."""
+        """Execute implementation tasks utilizing tool call loops."""
         messages = list(history) if history else []
 
-        # Fetch initial core Obsidian rules dynamically if enabled
         if auto_fetch_vault_rules and self.obsidian_adapter:
             vault_rules = self.obsidian_adapter.read_rules(task_instruction=task_description)
             active_rules = f"{rules}\n\n{vault_rules}".strip()
@@ -252,15 +255,13 @@ class CoderAgent(BaseAgent):
         user_message = "\n\n".join(user_message_parts)
         messages.append({"role": "user", "content": user_message})
 
-        logger.info(f"[Coder] Processing task in workspace '{self.workspace_root}': {task_description[:60]}...")
+        self.ui_logger.start_action(f"Executing task: {task_description[:60]}...")
 
-        # Detect configuration/manifest setup intent to enable dynamic priming
         is_config_task = any(
             kw in task_description.lower() for kw in ["pyproject", "toml", "package.json", "config", "manifest", "setup"]
         )
 
         for iteration in range(max_tool_iterations):
-            # Dynamic Context Injection: Prompt priming on the first iteration for config tasks
             if iteration == 0 and is_config_task and self.obsidian_adapter:
                 iteration_messages = messages + [{
                     "role": "user",
@@ -282,10 +283,10 @@ class CoderAgent(BaseAgent):
             messages.append(msg_dict)
 
             if not hasattr(message, "tool_calls") or not message.tool_calls:
+                self.ui_logger.stop_action("Task implementation completed.")
                 return response
 
             for tool_call in message.tool_calls:
-                logger.info(f"[Coder] Tool Call requested: {tool_call.function.name}")
                 tool_result = self._execute_tool_call(tool_call)
                 messages.append({
                     "role": "tool",
@@ -293,4 +294,5 @@ class CoderAgent(BaseAgent):
                     "content": tool_result,
                 })
 
+        self.ui_logger.stop_action("Task completed after tool iterations.")
         return response
