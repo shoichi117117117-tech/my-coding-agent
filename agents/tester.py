@@ -6,6 +6,7 @@ import textwrap
 from datetime import datetime
 from pathlib import Path
 from typing import Any, Dict, List, Optional, Union
+from pydantic import BaseModel, Field
 
 from agents.base import BaseAgent, extract_response_content
 from tools.code_editor import CodeEditor
@@ -127,6 +128,21 @@ TESTER_TOOLS: List[Dict[str, Any]] = [
         },
     },
 ]
+class TroubleshootingAnalysis(BaseModel):
+    """Pydantic schema enforcing structured JSON output from the LLM."""
+
+    tags: List[str] = Field(
+        description="Extract 2-5 relevant technology or domain tags (e.g., ['python', 'venv', 'pytest'])."
+    )
+    related_topics: List[str] = Field(
+        description="Extract 1-3 core topic keywords for Obsidian WikiLinks without brackets (e.g., ['Python', 'Virtual Environment'])."
+    )
+    root_cause_analysis: str = Field(
+        description="Detailed explanation for the '## 2. Root Cause Analysis' section."
+    )
+    solution_and_prevention: str = Field(
+        description="Clear actionable steps for the '## 3. Solution & Prevention Rules' section."
+    )
 
 
 class TesterAgent(BaseAgent):
@@ -307,48 +323,67 @@ class TesterAgent(BaseAgent):
         save_to_vault: bool = True,
         relative_folder: str = "30_Resources/Troubleshooting",
     ) -> str:
-        """Generate structured Markdown troubleshooting note and save to Obsidian Vault."""
-        with self.ui_logger.status(f"Archiving troubleshooting knowledge note: '{error_title}'..."):
+        """Generate structured Markdown troubleshooting note using Pydantic structured output, bypassing regex parsing."""
+        with self.ui_logger.status(
+            f"Archiving troubleshooting knowledge note: '{error_title}'..."
+        ):
             today_str = datetime.now().strftime("%Y-%m-%d")
 
             user_prompt = (
-                f"Analyze the following resolved issue and provide detailed content for a troubleshooting note:\n\n"
+                f"Analyze the following resolved issue and extract structured knowledge for an Obsidian note.\n\n"
                 f"Title: {error_title}\n"
                 f"Error Output:\n```text\n{error_log}\n```\n"
-                f"Solution Applied:\n{solution_summary}\n\n"
-                f"Instructions:\n"
-                f"1. Explain the Root Cause Analysis (RCA) in detail under a '## 2. Root Cause Analysis' section.\n"
-                f"2. Summarize the Solution & Prevention Rules clearly under a '## 3. Solution & Prevention Rules' section.\n"
-                f"3. Use Obsidian WikiLinks (e.g., [[Python]], [[Pytest]], [[FastAPI]]) where appropriate.\n"
-                f"4. Do NOT include Frontmatter (---) or the main title (# Title). Start directly with the '## 2. Root Cause Analysis' header."
+                f"Solution Applied:\n{solution_summary}"
             )
 
             messages = [{"role": "user", "content": user_prompt}]
-            response = self.call_llm(messages=messages)
-            body_content = extract_response_content(response).strip()
 
-            match = re.search(r"^```(?:markdown)?\s*([\s\S]*?)\s*```$", body_content, re.IGNORECASE)
-            if match:
-                body_content = match.group(1).strip()
+            # Request structured Pydantic object directly from LLM via OpenRouter/OpenAI API
+            structured_data: TroubleshootingAnalysis = self.call_llm_structured(
+                messages=messages, response_format=TroubleshootingAnalysis
+            )
 
-            markdown_content = textwrap.dedent(f"""\
-                ---
-                type: troubleshooting
-                date: '{today_str}'
-                tags:
-                  - error-solution
-                  - troubleshooting
-                ---
+            # Sanitize dynamic technology tags
+            tags = ["troubleshooting", "error-solution"]
+            sanitized_extracted_tags = [
+                t.strip().lower().replace(" ", "-")
+                for t in structured_data.tags
+                if t.strip()
+            ]
+            tags.extend(sanitized_extracted_tags)
+            unique_tags = list(dict.fromkeys(tags))
 
-                # [Issue] {error_title}
+            # Format WikiLinks cleanly
+            related_topics = [
+                f'"[[{topic.strip()}]]"'
+                for topic in structured_data.related_topics
+                if topic.strip()
+            ] or ['"[[Troubleshooting]]"']
 
-                ## 1. Symptom & Error Log
-                ```text
-                {error_log.strip()}
-                ```
+            # Construct YAML frontmatter blocks
+            tags_yaml = "\n".join([f"  - {tag}" for tag in unique_tags])
+            topics_yaml = "\n".join([f"  - {topic}" for topic in related_topics])
 
-                {body_content}
-            """)
+            # Build clean markdown without any regular expressions or redundant text
+            markdown_content = (
+                f"---\n"
+                f"type: troubleshooting\n"
+                f"date: '{today_str}'\n"
+                f"tags:\n"
+                f"{tags_yaml}\n"
+                f"related_topics:\n"
+                f"{topics_yaml}\n"
+                f"---\n\n"
+                f"# [Issue] {error_title}\n\n"
+                f"## 1. Symptom & Error Log\n"
+                f"```text\n"
+                f"{error_log.strip()}\n"
+                f"```\n\n"
+                f"## 2. Root Cause Analysis\n"
+                f"{structured_data.root_cause_analysis.strip()}\n\n"
+                f"## 3. Solution & Prevention Rules\n"
+                f"{structured_data.solution_and_prevention.strip()}\n"
+            )
 
             if save_to_vault and self.obsidian_adapter:
                 try:
@@ -357,8 +392,12 @@ class TesterAgent(BaseAgent):
                         content=markdown_content,
                         relative_folder=relative_folder,
                     )
-                    self.ui_logger.stop_action(f"Note successfully archived to Vault at: '{saved_path}'")
+                    self.ui_logger.stop_action(
+                        f"Note successfully archived to Vault at: '{saved_path}'"
+                    )
                 except Exception as e:
-                    self.ui_logger.error(f"Failed to save note to Obsidian Vault: {e}")
+                    self.ui_logger.error(
+                        f"Failed to save note to Obsidian Vault: {e}"
+                    )
 
             return markdown_content

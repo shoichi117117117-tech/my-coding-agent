@@ -202,16 +202,28 @@ class ObsidianAdapter:
 
         date_prefix = datetime.now().strftime("%Y-%m-%d")
 
-        # Clean title for safe filesystem naming
+        # Sanitize title for file system compatibility
         clean_title = re.sub(r"[^\w\s-]", "", title).strip().replace(" ", "_")
         clean_title = re.sub(r"_+", "_", clean_title)
         filename = f"{date_prefix}_{clean_title}.md"
 
-        # Clean content from surrounding markdown code blocks if agent wrapped entire note
+        # Strip redundant outer markdown code block wrappers
         cleaned_content = content.strip()
-        match = re.search(r"^```(?:markdown)?\s*([\s\S]*?)\s*```$", cleaned_content, re.IGNORECASE)
+        match = re.search(
+            r"^```(?:markdown)?\s*([\s\S]*?)\s*```$", cleaned_content, re.IGNORECASE
+        )
         if match:
             cleaned_content = match.group(1).strip()
+
+        # Normalize YAML frontmatter indentation to prevent Obsidian parsing errors
+        if cleaned_content.startswith("---"):
+            parts = cleaned_content.split("---", 2)
+            if len(parts) >= 3:
+                yaml_part = "\n".join(
+                    line.rstrip() for line in parts[1].strip().splitlines()
+                )
+                body_part = parts[2].lstrip()
+                cleaned_content = f"---\n{yaml_part}\n---\n\n{body_part}"
 
         file_path = target_dir / filename
         file_path.write_text(cleaned_content, encoding="utf-8")
