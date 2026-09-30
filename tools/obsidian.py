@@ -2,7 +2,7 @@ import os
 import re
 from datetime import datetime
 from pathlib import Path
-from typing import List, Dict, Any, Optional
+from typing import Any, Dict, List, Optional, Tuple
 
 
 class ObsidianAdapter:
@@ -30,21 +30,25 @@ class ObsidianAdapter:
             "database.md": ["db", "database", "sql", "sqlite", "orm", "query", "postgres"],
         }
 
-    def search(self, query: str, max_results: int = 5) -> str:
+    def search_with_sources(
+        self, query: str, max_results: int = 5
+    ) -> Tuple[str, List[str]]:
         """Search across all Markdown notes in the Obsidian Vault for matching keywords or phrases.
 
         :param query: Keyword or space-separated search query.
         :param max_results: Maximum number of note snippets to return.
-        :return: Formatted string containing matching file snippets.
+        :return: Tuple containing (formatted_result_text, list_of_relative_file_paths)
         """
         if not self.vault_path.exists():
-            return "Obsidian Vault directory does not exist."
+            return "Obsidian Vault directory does not exist.", []
 
         keywords = [k.lower() for k in query.split() if k.strip()]
         if not keywords:
-            return "Empty search query provided."
+            return "Empty search query provided.", []
 
         matches = []
+        matched_sources = []
+
         for md_file in self.vault_path.rglob("*.md"):
             # Ignore log files or hidden directories
             if ".obsidian" in md_file.parts or "50_Logs" in md_file.parts:
@@ -57,20 +61,36 @@ class ObsidianAdapter:
                 # Check if all or any keywords match
                 if any(kw in content_lower for kw in keywords):
                     rel_path = md_file.relative_to(self.vault_path)
+                    rel_path_str = str(rel_path).replace("\\", "/")
+
                     # Extract concise snippet
-                    snippet_lines = [line for line in content.splitlines() if any(kw in line.lower() for kw in keywords)]
+                    snippet_lines = [
+                        line for line in content.splitlines()
+                        if any(kw in line.lower() for kw in keywords)
+                    ]
                     snippet = "\n".join(snippet_lines[:5])
-                    matches.append(f"--- Note: [[{rel_path}]] ---\n{snippet}")
+                    matches.append(f"--- Note: [[{rel_path_str}]] ---\n{snippet}")
+                    matched_sources.append(rel_path_str)
 
                     if len(matches) >= max_results:
                         break
-            except Exception as e:
+            except Exception:
                 continue
 
         if not matches:
-            return f"No relevant notes or guidelines found in Obsidian Vault for query: '{query}'."
+            return (
+                f"No relevant notes or guidelines found in Obsidian Vault for query: '{query}'.",
+                [],
+            )
 
-        return "\n\n".join(matches)
+        return "\n\n".join(matches), matched_sources
+
+    def search(self, query: str, max_results: int = 5) -> str:
+        """Search across all Markdown notes in the Obsidian Vault for matching keywords.
+        Backward-compatible wrapper returning only the formatted text string.
+        """
+        result_text, _ = self.search_with_sources(query, max_results=max_results)
+        return result_text
 
     def read_rules(
         self,
@@ -181,7 +201,7 @@ class ObsidianAdapter:
         target_dir.mkdir(parents=True, exist_ok=True)
 
         date_prefix = datetime.now().strftime("%Y-%m-%d")
-        
+
         # Clean title for safe filesystem naming
         clean_title = re.sub(r"[^\w\s-]", "", title).strip().replace(" ", "_")
         clean_title = re.sub(r"_+", "_", clean_title)

@@ -8,7 +8,7 @@ from typing import Any, Dict, List, Optional, Union
 
 from agents.base import BaseAgent, extract_response_content
 from tools.obsidian import ObsidianAdapter
-from utils.ui import AgentLogger
+from utils.ui import AgentLogger, sanitize_text
 
 PLANNER_SYSTEM_PROMPT = """You are the Lead Software Architect and Planner Agent responsible for analyzing user requests, breaking down complex software development tasks into structured sequential steps, diagnosing runtime/terminal errors, and suggesting clean directory architectures and verification strategies.
 
@@ -72,15 +72,15 @@ Strict Rules:
 
 
 class PlannerAgent(BaseAgent):
-    """Planner Agent decomposing high-level specifications into JSON plans and analyzing strategies."""
+    """Planner Agent decomposing high-level specifications into structured JSON plans and analyzing execution strategies."""
 
     def __init__(
         self,
-        workspace_root: Optional[str] = None,
-        obsidian_vault_path: Optional[str] = None,
+        workspace_root: Optional[Union[str, Path]] = None,
+        obsidian_vault_path: Optional[Union[str, Path]] = None,
         model_fallback_list: Optional[List[str]] = None,
     ) -> None:
-        """Initialize PlannerAgent with workspace paths and tools."""
+        """Initialize PlannerAgent with workspace paths and knowledge tools."""
         self.workspace_root = Path(workspace_root).resolve() if workspace_root else None
         self.obsidian_vault_path = Path(obsidian_vault_path).resolve() if obsidian_vault_path else None
         self.obsidian_adapter = ObsidianAdapter(str(self.obsidian_vault_path)) if self.obsidian_vault_path else None
@@ -107,61 +107,61 @@ class PlannerAgent(BaseAgent):
         return content
 
     def suggest_project_structure(self, task_instruction: str) -> Dict[str, str]:
-        """Infer clean lower_snake_case folder name and main target filename from user task."""
-        self.ui_logger.start_action("Analyzing request to suggest project structure & folder name...")
-        clean_instruction = re.sub(r"\s+", " ", task_instruction).strip()
-        short_task = clean_instruction[:500]
+        """Infer clean lower_snake_case folder name and main target filename from user task instruction."""
+        with self.ui_logger.status("Analyzing request to suggest project structure & folder name..."):
+            clean_instruction = re.sub(r"\s+", " ", task_instruction).strip()
+            short_task = clean_instruction[:500]
 
-        prompt = (
-            f"Analyze this user task and propose a specific, descriptive lower_snake_case folder name "
-            f"(1-3 words max, directly reflecting the task, e.g., 'fastapi_fibonacci', 'sales_csv_analyzer', 'email_validator') "
-            f"and a primary target filename (e.g., main.py, index.js, App.java).\n\n"
-            f"Task: {short_task}\n\n"
-            f"CRITICAL RULES:\n"
-            f"- DO NOT use generic names like 'my_project', 'generated_project', 'project', or 'app'.\n"
-            f"- Folder name MUST directly reflect the user's specific request.\n"
-            f"- Output ONLY valid JSON matching this exact structure:\n"
-            f'{{"folder_name": "descriptive_name_here", "main_file": "main.py"}}'
-        )
-
-        fallback_timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
-
-        try:
-            response = self.call_llm(
-                messages=[{"role": "user", "content": prompt}],
-                response_format={"type": "json_object"},
+            prompt = (
+                f"Analyze this user task and propose a specific, descriptive lower_snake_case folder name "
+                f"(1-3 words max, directly reflecting the task, e.g., 'fastapi_fibonacci', 'sales_csv_analyzer', 'email_validator') "
+                f"and a primary target filename (e.g., main.py, index.js, App.java).\n\n"
+                f"Task: {short_task}\n\n"
+                f"CRITICAL RULES:\n"
+                f"- DO NOT use generic names like 'my_project', 'generated_project', 'project', or 'app'.\n"
+                f"- Folder name MUST directly reflect the user's specific request.\n"
+                f"- Output ONLY valid JSON matching this exact structure:\n"
+                f'{{"folder_name": "descriptive_name_here", "main_file": "main.py"}}'
             )
-            raw_content = extract_response_content(response)
-            cleaned_str = self._clean_json_response(raw_content)
-            parsed = json.loads(cleaned_str)
 
-            raw_folder = parsed.get("folder_name", "")
-            raw_main = parsed.get("main_file", "")
+            fallback_timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
 
-            folder = raw_folder.lower().replace(" ", "_").replace("-", "_")
-            folder = re.sub(r"[^a-z0-9_]", "", folder)
-            folder = re.sub(r"_+", "_", folder).strip("_")
+            try:
+                response = self.call_llm(
+                    messages=[{"role": "user", "content": prompt}],
+                    response_format={"type": "json_object"},
+                )
+                raw_content = extract_response_content(response)
+                cleaned_str = self._clean_json_response(raw_content)
+                parsed = json.loads(cleaned_str)
 
-            main_file = re.sub(r"[^\w\.-]", "", raw_main).strip()
+                raw_folder = str(parsed.get("folder_name", ""))
+                raw_main = str(parsed.get("main_file", ""))
 
-            generic_names = {"generated_project", "my_project", "project", "app", "python_project", "test_project"}
-            if not folder or folder in generic_names:
-                words = re.findall(r"\b[a-zA-Z]{3,}\b", short_task.lower())
-                meaningful_words = [w for w in words if w not in {"create", "build", "make", "using", "python", "with", "test", "file"}]
-                if meaningful_words:
-                    folder = f"{'_'.join(meaningful_words[:2])}_app"
-                else:
-                    folder = f"project_{fallback_timestamp}"
+                folder = raw_folder.lower().replace(" ", "_").replace("-", "_")
+                folder = re.sub(r"[^a-z0-9_]", "", folder)
+                folder = re.sub(r"_+", "_", folder).strip("_")
 
-            folder_result = folder
-            main_result = main_file if main_file else "main.py"
-            self.ui_logger.stop_action(f"Suggested structure: folder='{folder_result}', main_file='{main_result}'")
-            return {"folder_name": folder_result, "main_file": main_result}
+                main_file = re.sub(r"[^\w\.-]", "", raw_main).strip()
 
-        except Exception as e:
-            fallback_folder = f"project_{fallback_timestamp}"
-            self.ui_logger.warning(f"Failed to infer structure ({e}). Fallback folder: '{fallback_folder}'")
-            return {"folder_name": fallback_folder, "main_file": "main.py"}
+                generic_names = {"generated_project", "my_project", "project", "app", "python_project", "test_project"}
+                if not folder or folder in generic_names:
+                    words = re.findall(r"\b[a-zA-Z]{3,}\b", short_task.lower())
+                    meaningful_words = [w for w in words if w not in {"create", "build", "make", "using", "python", "with", "test", "file"}]
+                    if meaningful_words:
+                        folder = f"{'_'.join(meaningful_words[:2])}_app"
+                    else:
+                        folder = f"project_{fallback_timestamp}"
+
+                folder_result = folder
+                main_result = main_file if main_file else "main.py"
+                self.ui_logger.stop_action(f"Suggested structure: folder='{folder_result}', main_file='{main_result}'")
+                return {"folder_name": folder_result, "main_file": main_result}
+
+            except Exception as e:
+                fallback_folder = f"project_{fallback_timestamp}"
+                self.ui_logger.warning(f"Failed to infer structure ({e}). Fallback folder: '{fallback_folder}'")
+                return {"folder_name": fallback_folder, "main_file": "main.py"}
 
     def suggest_project_folder(self, task_instruction: str) -> str:
         """Extract workspace folder name from project structure suggestion."""
@@ -170,52 +170,52 @@ class PlannerAgent(BaseAgent):
 
     def analyze_verification_strategy(self, task_instruction: str) -> Dict[str, Optional[str]]:
         """Dynamically analyze project requirements to deduce automated verification command and mode."""
-        self.ui_logger.start_action("Determining project verification strategy...")
-        structure = self.suggest_project_structure(task_instruction)
-        target_file = structure.get("main_file", "main.py")
+        with self.ui_logger.status("Determining project verification strategy..."):
+            structure = self.suggest_project_structure(task_instruction)
+            target_file = structure.get("main_file", "main.py")
 
-        prompt = (
-            f"Task Instruction: {task_instruction}\n"
-            f"Primary Target File: {target_file}\n\n"
-            "Analyze project nature and determine verification mode and command.\n"
-            "Modes: 'unit_test', 'build_or_lint', 'direct_execution', 'none'.\n\n"
-            "Respond ONLY in valid JSON:\n"
-            "{\n"
-            '  "target_file": "main.py",\n'
-            '  "test_file": "tests/test_main.py",\n'
-            '  "test_command": "uv run pytest tests/test_main.py",\n'
-            '  "mode": "unit_test"\n'
-            "}"
-        )
-
-        try:
-            response = self.call_llm(
-                messages=[{"role": "user", "content": prompt}],
-                response_format={"type": "json_object"},
+            prompt = (
+                f"Task Instruction: {task_instruction}\n"
+                f"Primary Target File: {target_file}\n\n"
+                "Analyze project nature and determine verification mode and command.\n"
+                "Modes: 'unit_test', 'build_or_lint', 'direct_execution', 'none'.\n\n"
+                "Respond ONLY in valid JSON:\n"
+                "{\n"
+                '  "target_file": "main.py",\n'
+                '  "test_file": "tests/test_main.py",\n'
+                '  "test_command": "uv run pytest tests/test_main.py",\n'
+                '  "mode": "unit_test"\n'
+                "}"
             )
-            raw_content = extract_response_content(response)
-            cleaned_str = self._clean_json_response(raw_content)
-            parsed = json.loads(cleaned_str)
 
-            res = {
-                "target_file": parsed.get("target_file", target_file),
-                "test_file": parsed.get("test_file"),
-                "test_command": parsed.get("test_command"),
-                "mode": parsed.get("mode", "direct_execution"),
-            }
-            self.ui_logger.stop_action(f"Verification mode selected: '{res['mode']}' using command: '{res['test_command']}'")
-            return res
-        except Exception as e:
-            self.ui_logger.warning(f"Strategy analysis error ({e}). Using default fallback strategy.")
-            stem = Path(target_file).stem
-            test_file = f"tests/test_{stem}.py" if target_file.endswith(".py") else None
-            test_command = f"uv run pytest {test_file}" if test_file else f"python {target_file}"
-            return {
-                "target_file": target_file,
-                "test_file": test_file,
-                "test_command": test_command,
-                "mode": "unit_test" if target_file.endswith(".py") else "direct_execution",
-            }
+            try:
+                response = self.call_llm(
+                    messages=[{"role": "user", "content": prompt}],
+                    response_format={"type": "json_object"},
+                )
+                raw_content = extract_response_content(response)
+                cleaned_str = self._clean_json_response(raw_content)
+                parsed = json.loads(cleaned_str)
+
+                res = {
+                    "target_file": str(parsed.get("target_file", target_file)),
+                    "test_file": parsed.get("test_file"),
+                    "test_command": parsed.get("test_command"),
+                    "mode": str(parsed.get("mode", "direct_execution")),
+                }
+                self.ui_logger.stop_action(f"Verification mode selected: '{res['mode']}' using command: '{res['test_command']}'")
+                return res
+            except Exception as e:
+                self.ui_logger.warning(f"Strategy analysis error ({e}). Using default fallback strategy.")
+                stem = Path(target_file).stem
+                test_file = f"tests/test_{stem}.py" if target_file.endswith(".py") else None
+                test_command = f"uv run pytest {test_file}" if test_file else f"python {target_file}"
+                return {
+                    "target_file": target_file,
+                    "test_file": test_file,
+                    "test_command": test_command,
+                    "mode": "unit_test" if target_file.endswith(".py") else "direct_execution",
+                }
 
     def create_plan(
         self,
@@ -225,50 +225,67 @@ class PlannerAgent(BaseAgent):
         error_context: Optional[str] = None,
         attempt: int = 1,
         auto_fetch_vault_rules: bool = True,
-    ) -> Union[List[Dict[str, Any]], str]:
+    ) -> str:
         """Formulate a structured JSON execution or rescue plan."""
-        if auto_fetch_vault_rules and self.obsidian_adapter:
-            self.ui_logger.start_action("Searching Obsidian Vault for active rules...")
-            vault_rules = self.obsidian_adapter.read_rules(task_instruction=task_instruction)
-            active_rules = f"{domain_rules}\n\n{vault_rules}".strip()
-            self.ui_logger.stop_action("Retrieved Obsidian rules successfully.")
-        else:
-            active_rules = domain_rules.strip() if domain_rules else "No specific rules provided."
-
-        if error_context:
-            self.ui_logger.start_action(f"Formulating Rescue Plan (Attempt #{attempt})...")
-            formatted_user_message = (
-                f"【ATTEMPT #{attempt} FAILED】\n"
-                f"Target File: {target_file}\n"
-                f"Target Goal: {task_instruction}\n\n"
-                f"【Terminal / Test Error Output & RCA】\n"
-                f"```text\n{error_context}\n```\n\n"
-                f"【Active Development Rules】\n{active_rules}\n\n"
-                "Please perform a Root Cause Analysis and output a JSON execution plan (Rescue Plan) for Coder/Tester."
-            )
-        else:
-            self.ui_logger.start_action("Decomposing request into structured execution steps...")
-            formatted_user_message = (
-                f"【Target File】: {target_file}\n"
-                f"【Active Development Rules】\n{active_rules}\n\n"
-                f"【User Request】\n{task_instruction}\n\n"
-                "Please output a structured JSON execution plan for this task."
-            )
-
-        messages = [{"role": "user", "content": formatted_user_message}]
-
-        response = self.call_llm(
-            messages=messages,
-            response_format={"type": "json_object"},
+        status_msg = (
+            f"Formulating Rescue Plan (Attempt #{attempt})..."
+            if error_context
+            else "Searching Obsidian Vault for rules..."
         )
-        raw_content = extract_response_content(response)
-        cleaned_json_str = self._clean_json_response(raw_content)
 
-        try:
-            parsed_plan = json.loads(cleaned_json_str)
-            steps = parsed_plan.get("steps", [])
-            self.ui_logger.stop_action(f"Plan generated successfully with {len(steps)} sub-tasks.")
-            return json.dumps(parsed_plan, indent=2, ensure_ascii=False)
-        except json.JSONDecodeError as e:
-            self.ui_logger.error(f"Failed to parse JSON plan output: {e}")
-            return cleaned_json_str
+        with self.ui_logger.status(status_msg):
+            active_rules = domain_rules.strip() if domain_rules else ""
+
+            if auto_fetch_vault_rules and self.obsidian_adapter:
+                clean_query = sanitize_text(task_instruction)[:100]
+                self.ui_logger.info("Searching Obsidian Vault for rules...")
+                self.ui_logger.tool_call("search_obsidian_vault", clean_query)
+                vault_rules = self.obsidian_adapter.read_rules(task_instruction=clean_query)
+                _, read_sources = self.obsidian_adapter.search_with_sources(query=clean_query)
+
+                if read_sources:
+                    self.ui_logger.tool_result(read_sources)
+
+                active_rules = f"{active_rules}\n\n{vault_rules}".strip()
+
+            if not active_rules:
+                active_rules = "No specific rules provided."
+
+            self.ui_logger.info("Decomposing request into sub-tasks...")
+
+            if error_context:
+                formatted_user_message = (
+                    f"【ATTEMPT #{attempt} FAILED】\n"
+                    f"Target File: {target_file}\n"
+                    f"Target Goal: {task_instruction}\n\n"
+                    f"【Terminal / Test Error Output & RCA】\n"
+                    f"```text\n{error_context}\n```\n\n"
+                    f"【Active Development Rules】\n{active_rules}\n\n"
+                    "Please perform a Root Cause Analysis and output a JSON execution plan (Rescue Plan) for Coder/Tester."
+                )
+            else:
+                formatted_user_message = (
+                    f"【Target File】: {target_file}\n"
+                    f"【Active Development Rules】\n{active_rules}\n\n"
+                    f"【User Request】\n{task_instruction}\n\n"
+                    "Please output a structured JSON execution plan for this task."
+                )
+
+            messages = [{"role": "user", "content": formatted_user_message}]
+
+            response = self.call_llm(
+                messages=messages,
+                response_format={"type": "json_object"},
+            )
+            raw_content = extract_response_content(response)
+
+            cleaned_json_str = self._clean_json_response(raw_content)
+
+            try:
+                parsed_plan = json.loads(cleaned_json_str)
+                steps = parsed_plan.get("steps", [])
+                self.ui_logger.stop_action(f"Plan generated successfully with {len(steps)} sub-tasks.")
+                return json.dumps(parsed_plan, indent=2, ensure_ascii=False)
+            except json.JSONDecodeError as e:
+                self.ui_logger.error(f"Failed to parse JSON plan output: {e}")
+                return cleaned_json_str

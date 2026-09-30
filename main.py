@@ -20,8 +20,8 @@ from utils import ui
 # Initialize file logging persistence at system startup
 setup_file_logging()
 
-# Global workspace path configuration
-BASE_PROJECTS_DIR = Path(getattr(Config, "BASE_PROJECTS_DIR", "C:/Users/shoic/projects_with_agent"))
+# Global workspace path configuration with fallback default
+BASE_PROJECTS_DIR = Path(getattr(Config, "BASE_PROJECTS_DIR", Path.home() / "projects_with_agent"))
 
 # Unified agent loggers
 sys_logger = ui.AgentLogger("System")
@@ -57,7 +57,7 @@ def run_agent_workflow() -> None:
     """Execute modern autonomous coding workflow with closed-loop multi-agent orchestration."""
     ui.render_banner(BASE_PROJECTS_DIR, Config.OBSIDIAN_VAULT_PATH, Config.MAX_RETRIES)
 
-    # Step 1: Initialize adapters and tools
+    # Step 1: Initialize adapters and tools safely
     try:
         obsidian = ObsidianAdapter(str(Config.OBSIDIAN_VAULT_PATH))
         terminal = TerminalRunner(default_timeout=30)
@@ -74,16 +74,16 @@ def run_agent_workflow() -> None:
         return
 
     # ---------------------------------------------------------
-    # Phase 1: Workspace Isolation
+    # Phase 1: Workspace Isolation & Setup
     # ---------------------------------------------------------
+    sys_logger.info("Identifying workspace and verification strategy...")
+
     planner = PlannerAgent(
         workspace_root=str(BASE_PROJECTS_DIR),
         obsidian_vault_path=str(Config.OBSIDIAN_VAULT_PATH),
     )
 
-    planner_logger.start_action("Inferring project environment and directory name...")
     project_folder_name = planner.suggest_project_folder(task_instruction)
-    planner_logger.stop_action(f"Target workspace identified: {project_folder_name}")
 
     project_workspace = BASE_PROJECTS_DIR / project_folder_name
     project_workspace.mkdir(parents=True, exist_ok=True)
@@ -99,20 +99,13 @@ def run_agent_workflow() -> None:
     # ---------------------------------------------------------
     # Phase 2: Dynamic Verification Strategy Inference
     # ---------------------------------------------------------
-    planner_logger.start_action("Analyzing verification strategies and retrieving Obsidian guidelines...")
-    obsidian_rules = obsidian.read_rules(task_instruction=task_instruction)
+    obsidian_rules = obsidian.read_rules(task_instruction=task_instruction[:100])
     strategy = planner.analyze_verification_strategy(task_instruction)
 
-    target_file = strategy.get("target_file", "main.py")
+    target_file = str(strategy.get("target_file") or "main.py")
     test_file = strategy.get("test_file")
     test_command = strategy.get("test_command")
-    execution_mode = strategy.get("mode", "direct_execution")
-
-    planner_logger.stop_action("Strategy configuration completed.")
-    sys_logger.key_value("Target File", target_file)
-    sys_logger.key_value("Execution Mode", execution_mode)
-    if test_command:
-        sys_logger.key_value("Verification Command", test_command)
+    execution_mode = str(strategy.get("mode") or "direct_execution")
 
     # ---------------------------------------------------------
     # Initialize Core Execution Agents
@@ -131,18 +124,14 @@ def run_agent_workflow() -> None:
     current_error: Optional[str] = None
     tester_review: Optional[str] = None
 
-    ui.render_phase_header(f"Executing Smart Workflow: {project_folder_name}")
-
     # ---------------------------------------------------------
     # Phase 3-5: Closed-Loop ReAct / Self-Correction Cycle
     # ---------------------------------------------------------
     while True:
         attempt_num = retry_count + 1
-        sys_logger.info(f"--- Iteration {attempt_num}/{Config.MAX_RETRIES} ---")
 
         try:
             # Step A: Planner Generates/Updates Structured Plan
-            planner_logger.start_action("Processing execution feedback and drafting strategy plan...")
             planner_error_context = None
             if current_error:
                 planner_error_context = (
@@ -151,7 +140,7 @@ def run_agent_workflow() -> None:
                 )
 
             raw_plan_json = planner.create_plan(
-                task_instruction=formatted_instruction,
+                task_instruction=task_instruction,
                 target_file=target_file,
                 domain_rules=obsidian_rules,
                 error_context=planner_error_context,
@@ -159,11 +148,9 @@ def run_agent_workflow() -> None:
                 auto_fetch_vault_rules=True,
             )
             plan_steps = parse_plan_steps(raw_plan_json)
-            planner_logger.stop_action(f"Strategy plan structured ({len(plan_steps)} steps).")
 
-            # Step B: Tester Generates Test Suite
+            # Step B: Tester Generates Test Suite (If applicable)
             if execution_mode == "unit_test" and test_file:
-                tester_logger.start_action("Generating unit test suite with context...")
                 existing_code = ""
                 source_path = project_workspace / target_file
                 if source_path.exists():
@@ -173,21 +160,18 @@ def run_agent_workflow() -> None:
                     target_file=target_file,
                     code_content=existing_code,
                     test_requirements=f"Plan:\n{raw_plan_json}\n\nTask:\n{formatted_instruction}",
-                    auto_fetch_vault_rules=True,
+                    auto_fetch_vault_rules=False,
                 )
 
                 full_test_path = project_workspace / test_file
                 full_test_path.parent.mkdir(parents=True, exist_ok=True)
                 full_test_path.write_text(test_code, encoding="utf-8")
                 tester_logger.stop_action(f"Test suite stored at: {test_file}")
-            else:
-                sys_logger.info("Skipping automated test generation (Mode is not unit_test).")
 
             # Step C: Coder Implements/Refactors Codebase
-            coder_logger.start_action("Implementing codebase and executing modifications...")
             coder_prompt = (
                 f"Implement or update the codebase based on the execution plan below.\n"
-                f"If specific configuration manifests (e.g. pyproject.toml, package.json) are required by the plan, "
+                f"If specific configuration manifests (e.g., pyproject.toml, package.json) are required by the plan, "
                 f"use `search_obsidian_vault` tool to verify correct schemas if needed.\n\n"
                 f"Execution Plan:\n{raw_plan_json}\n\n"
                 f"User Instruction:\n{formatted_instruction}"
@@ -196,15 +180,16 @@ def run_agent_workflow() -> None:
                 task_description=coder_prompt,
                 rules=obsidian_rules,
                 error_context=planner_error_context,
-                auto_fetch_vault_rules=True,
+                auto_fetch_vault_rules=False,
+                iteration_current=attempt_num,
+                iteration_total=Config.MAX_RETRIES,
             )
-            coder_logger.stop_action(f"Source code synchronized for {target_file}")
 
             # Step D: Sequential Plan Execution & Setup Commands
             plan_execution_failed = False
             for step in plan_steps:
                 cmd_to_run = step.get("command_to_execute")
-                if cmd_to_run and cmd_to_run.strip() != test_command.strip():
+                if cmd_to_run and test_command and cmd_to_run.strip() != test_command.strip():
                     coder_logger.tool_call("Setup Command", cmd_to_run)
                     setup_res = terminal.run(cmd_to_run, cwd=str(project_workspace))
                     if not setup_res.success:
@@ -228,7 +213,7 @@ def run_agent_workflow() -> None:
 
         # Step E: Main Terminal Verification Execution
         if not test_command or execution_mode == "none":
-            sys_logger.info("No verification command specified. Workflow completed successfully.")
+            sys_logger.stop_action("Smart Workflow completed successfully!")
             obsidian.append_log(
                 task_description=task_instruction,
                 status="SUCCESS",
@@ -236,7 +221,6 @@ def run_agent_workflow() -> None:
             )
             break
 
-        sys_logger.info(f"Running verification command: {test_command}")
         exec_result = terminal.run(test_command, cwd=str(project_workspace))
 
         output_text = exec_result.stderr if not exec_result.success else exec_result.stdout
@@ -255,29 +239,26 @@ def run_agent_workflow() -> None:
                 status="SUCCESS",
                 execution_history=execution_history,
             )
-            sys_logger.info(f"Execution record archived to Obsidian: {log_path}")
+            sys_logger.stop_action("Smart Workflow completed successfully!")
             break
 
-        # Verification Failed
+        # Verification Failed: Initiate Self-Correction Loop
         retry_count += 1
         current_error = exec_result.stderr or exec_result.stdout
 
         ui.render_failure_panel(current_error, exec_result.returncode)
 
-        tester_logger.start_action("Performing Root Cause Analysis (RCA)...")
         tester_response = tester.execute_task(
             task_description=f"Analyze failure in {target_file} and perform Root Cause Analysis (RCA).",
             target_file=target_file,
             execution_log=current_error,
-            auto_fetch_vault_rules=True,
+            auto_fetch_vault_rules=False,
         )
 
         tester_review = getattr(tester_response, "content", str(tester_response))
-        tester_logger.stop_action("RCA report prepared.")
 
         ui.render_rca_report_panel(tester_review)
 
-        tester_logger.start_action("Archiving troubleshooting note to Obsidian Vault...")
         tester.generate_obsidian_troubleshooting_note(
             error_title=f"Execution Failure in {target_file} ({project_folder_name})",
             error_log=current_error,
@@ -285,7 +266,6 @@ def run_agent_workflow() -> None:
             save_to_vault=True,
             relative_folder="30_Resources/Troubleshooting",
         )
-        tester_logger.stop_action("Troubleshooting note created successfully.")
 
         if retry_count >= Config.MAX_RETRIES:
             ui.render_human_intervention_panel()

@@ -1,8 +1,10 @@
-"""UI Module handling all Rich rendering, layout formatting, and agent logging."""
+"""UI Module providing modern Rich terminal rendering, layout formatting, and agent logging."""
 
 import logging
+from contextlib import contextmanager
 from pathlib import Path
-from typing import Optional, Union
+from typing import Any, Dict, Generator, List, Optional, Union
+
 from rich.console import Console
 from rich.markup import escape
 from rich.panel import Panel
@@ -10,23 +12,31 @@ from rich.status import Status
 from rich.syntax import Syntax
 from rich.text import Text
 
-# Global Rich console instance
+# Global Rich console instance for system UI rendering
 console = Console()
 
-# Defined visual configurations per agent role
-AGENT_STYLES = {
-    "Planner": {"color": "cyan", "icon": "🧠", "label": "PLANNER"},
-    "Coder": {"color": "green", "icon": "⚡", "label": "CODER"},
-    "Tester": {"color": "yellow", "icon": "🔍", "label": "TESTER"},
+# Visual style configurations per agent role (Distinct colors assigned)
+AGENT_STYLES: Dict[str, Dict[str, str]] = {
+    "Planner": {"color": "cyan", "icon": "📌", "label": "PLANNER"},
+    "Coder": {"color": "green", "icon": "💻", "label": "CODER"},
+    "Tester": {"color": "yellow", "icon": "🧪", "label": "TESTER"},
     "System": {"color": "magenta", "icon": "🤖", "label": "SYSTEM"},
 }
 
 
+def sanitize_text(text: Any) -> str:
+    """Sanitize raw text by replacing newlines with single spaces to ensure clean single-line terminal logs."""
+    if text is None:
+        return ""
+    clean_str = str(text).replace("\r\n", " ").replace("\n", " ").strip()
+    return " ".join(clean_str.split())
+
+
 class AgentLogger:
-    """Agent Logger encapsulating Rich style rendering and Python logging delegator."""
+    """Agent Logger encapsulating Rich-styled UI rendering and standard Python logging delegation."""
 
     def __init__(self, agent_name: str) -> None:
-        """Initialize AgentLogger with styled colors and icons."""
+        """Initialize AgentLogger with visual style configurations and standard logger instance."""
         self.agent_name = agent_name
         style_info = AGENT_STYLES.get(
             agent_name, {"color": "blue", "icon": "📌", "label": agent_name.upper()}
@@ -35,82 +45,225 @@ class AgentLogger:
         self.icon = style_info["icon"]
         self.label = style_info["label"]
         self._active_status: Optional[Status] = None
+        self._last_status_text: Optional[str] = None
         self.py_logger = logging.getLogger(agent_name)
 
-    def start_action(self, action_description: str) -> None:
-        """Display animated terminal spinner for background tasks."""
-        if self._active_status:
-            self._active_status.stop()
-
+    def _format_status_text(self, action_description: str) -> Text:
+        """Construct a styled Rich Text instance for active spinner descriptions."""
+        clean_desc = sanitize_text(action_description)
         status_text = Text()
         status_text.append(f"[{self.label}] ", style=f"bold {self.color}")
-        status_text.append(action_description, style="bold white")
+        status_text.append(clean_desc, style="bold white")
+        return status_text
 
-        self._active_status = console.status(status_text, spinner="dots")
-        self._active_status.start()
-        self.py_logger.info(f"Started: {action_description}")
+    def _pause_active_status(self) -> Optional[str]:
+        """Temporarily pause active spinner before printing log lines to prevent display artifacts."""
+        if self._active_status is not None:
+            saved_text = self._last_status_text
+            try:
+                self._active_status.stop()
+            except Exception:
+                pass
+            self._active_status = None
+            return saved_text
+        return None
+
+    def _resume_active_status(self, saved_text: Optional[str]) -> None:
+        """Resume active spinner seamlessly after log lines have been printed."""
+        if saved_text:
+            self._active_status = console.status(
+                self._format_status_text(saved_text), spinner="dots"
+            )
+            self._last_status_text = saved_text
+            self._active_status.start()
+
+    def _stop_active_status(self) -> None:
+        """Safely stop and clear any active terminal spinner."""
+        if self._active_status is not None:
+            try:
+                self._active_status.stop()
+            except Exception:
+                pass
+            self._active_status = None
+            self._last_status_text = None
+
+    @contextmanager
+    def status(self, action_description: str) -> Generator[None, None, None]:
+        """Context manager to auto-manage animated spinner lifecycle during long operations or LLM calls."""
+        self.start_action(action_description)
+        try:
+            yield
+        finally:
+            self._stop_active_status()
+
+    def start_action(self, action_description: str) -> None:
+        """Start an animated spinner or smoothly update description if already active."""
+        clean_desc = sanitize_text(action_description)
+        self._last_status_text = clean_desc
+        if self._active_status is not None:
+            self._active_status.update(status=self._format_status_text(clean_desc))
+        else:
+            self._active_status = console.status(
+                self._format_status_text(clean_desc), spinner="dots"
+            )
+            self._active_status.start()
+        self.py_logger.info(f"Started: {clean_desc}")
+
+    def update_status(self, action_description: str) -> None:
+        """Update the active spinner description dynamically without disrupting the animation."""
+        clean_desc = sanitize_text(action_description)
+        self._last_status_text = clean_desc
+        if self._active_status is not None:
+            self._active_status.update(status=self._format_status_text(clean_desc))
+        else:
+            self.start_action(clean_desc)
+        self.py_logger.info(f"Updated status: {clean_desc}")
 
     def stop_action(self, completion_message: Optional[str] = None) -> None:
-        """Stop active spinner and print completion status."""
-        if self._active_status:
-            self._active_status.stop()
-            self._active_status = None
+        """Safely stop active spinner and render a completion checkmark status line."""
+        self._stop_active_status()
 
         if completion_message:
-            escaped_msg = escape(completion_message)
+            clean_msg = sanitize_text(completion_message)
+            escaped_msg = escape(clean_msg)
             console.print(
                 f"[{self.color}]✔[/] [bold {self.color}][{self.label}][/] {escaped_msg}"
             )
-            self.py_logger.info(f"Completed: {completion_message}")
+            self.py_logger.info(f"Completed: {clean_msg}")
 
     def info(self, message: str) -> None:
-        """Print plain text informational logs formatted safely with agent styles."""
-        if self._active_status:
-            self._active_status.stop()
-            self._active_status = None
+        """Print standard informational logs safely formatted with agent identity styles."""
+        saved_status = self._pause_active_status()
 
-        escaped_msg = escape(message)
+        clean_msg = sanitize_text(message)
+        escaped_msg = escape(clean_msg)
         console.print(
             f"[{self.color}]{self.icon}[/] [bold {self.color}][{self.label}][/] {escaped_msg}"
         )
-        self.py_logger.info(message)
+        self.py_logger.info(clean_msg)
+
+        self._resume_active_status(saved_status)
+
+    def log_llm_request(self, model_name: str, provider: str = "openrouter") -> None:
+        """Log LiteLLM request without introducing leading or trailing blank line artifacts."""
+        saved_status = self._pause_active_status()
+
+        escaped_model = escape(sanitize_text(model_name))
+        escaped_provider = escape(sanitize_text(provider))
+
+        console.print(
+            f"   [dim {self.color}]└─ 🌐 LiteLLM Request:[/"
+            f" [cyan]{escaped_model}[/] [dim]via ({escaped_provider})[/]"
+        )
+
+        self._resume_active_status(saved_status)
 
     def key_value(self, key: str, value: Any) -> None:
-        """Print key-value system status pair with consistent highlighting."""
-        if self._active_status:
-            self._active_status.stop()
-            self._active_status = None
+        """Print a key-value status pair with unified syntax highlighting."""
+        saved_status = self._pause_active_status()
 
-        escaped_key = escape(key)
-        escaped_val = escape(str(value))
+        clean_key = sanitize_text(key)
+        clean_val = sanitize_text(value)
+        escaped_key = escape(clean_key)
+        escaped_val = escape(clean_val)
         console.print(
             f"[{self.color}]{self.icon}[/] [bold {self.color}][{self.label}][/] "
             f"[bold cyan]{escaped_key}:[/bold cyan] [bold yellow]{escaped_val}[/bold yellow]"
         )
-        self.py_logger.info(f"{key}: {value}")
+        self.py_logger.info(f"{clean_key}: {clean_val}")
+
+        self._resume_active_status(saved_status)
 
     def tool_call(self, tool_name: str, args_summary: str = "") -> None:
-        """Log tool execution events with target summaries."""
-        summary_str = f"({args_summary})" if args_summary else ""
-        escaped_tool = escape(tool_name)
+        """Log tool invocation events with dynamic argument type labels (path, dir, query)."""
+        saved_status = self._pause_active_status()
+
+        clean_tool = sanitize_text(tool_name)
+        clean_args = sanitize_text(args_summary)
+
+        if len(clean_args) > 120:
+            clean_args = clean_args[:117] + "..."
+
+        if clean_tool in ["write_file", "read_file", "delete_file"]:
+            param_label = "path"
+        elif clean_tool == "make_directory":
+            param_label = "dir"
+        else:
+            param_label = "query"
+
+        summary_str = f' ({param_label}="{clean_args}")' if clean_args else ""
+
+        escaped_tool = escape(clean_tool)
         escaped_summary = escape(summary_str)
 
         console.print(
-            f"   [dim {self.color}]└─ 🛠 Tool Executed:[/]"
+            f"   [dim {self.color}]└─ 🛠 Executing Tool:["
             f" [bold cyan]{escaped_tool}[/]"
-            f" [dim]{escaped_summary}[/]"
+            f"[dim]{escaped_summary}[/]]"
         )
-        self.py_logger.info(f"Tool executed: {tool_name} {summary_str}".strip())
+        self.py_logger.info(f"Tool executed: {clean_tool} {summary_str}".strip())
+
+        self._resume_active_status(saved_status)
+
+    def tool_result(self, detail: Union[str, List[str]], max_display: int = 3) -> None:
+        """Log structured tool output details or file paths in a formatted tree view."""
+        saved_status = self._pause_active_status()
+
+        if isinstance(detail, str):
+            items = [sanitize_text(item) for item in detail.split(",") if sanitize_text(item)]
+        else:
+            items = [sanitize_text(item) for item in detail if sanitize_text(item)]
+
+        if not items:
+            self._resume_active_status(saved_status)
+            return
+
+        total = len(items)
+        if total == 1:
+            escaped_item = escape(items[0])
+            console.print(
+                f"      [dim {self.color}]└─ 📄 Read:[/] [dim cyan]{escaped_item}[/dim cyan]"
+            )
+        else:
+            console.print(
+                f"      [dim {self.color}]└─ 📄 Read ({total} files):[/]"
+            )
+            displayed_items = items[:max_display]
+            for idx, item in enumerate(displayed_items):
+                is_last_item = (idx == len(displayed_items) - 1) and (total <= max_display)
+                branch = "└─" if is_last_item else "├─"
+                escaped_item = escape(item)
+                console.print(
+                    f"         [dim {self.color}]{branch}[/] [dim cyan]{escaped_item}[/dim cyan]"
+                )
+
+            if total > max_display:
+                remaining = total - max_display
+                console.print(
+                    f"         [dim {self.color}]└─[/] [dim yellow]... and {remaining} more[/dim yellow]"
+                )
+
+        self.py_logger.info(f"Tool result details: {', '.join(items)}")
+
+        self._resume_active_status(saved_status)
 
     def warning(self, message: str) -> None:
-        """Print warning level messages."""
-        escaped_msg = escape(message)
+        """Print warning messages with highlighted warning styling."""
+        saved_status = self._pause_active_status()
+
+        clean_msg = sanitize_text(message)
+        escaped_msg = escape(clean_msg)
         console.print(f"[bold yellow]⚠️ [{self.label}] Warning:[/] {escaped_msg}")
-        self.py_logger.warning(message)
+        self.py_logger.warning(clean_msg)
+
+        self._resume_active_status(saved_status)
 
     def error(self, message: str) -> None:
-        """Print error logs wrapped inside styled Rich Panel."""
-        escaped_msg = escape(message)
+        """Print error logs enclosed within a styled Rich Panel."""
+        saved_status = self._pause_active_status()
+
+        clean_msg = sanitize_text(message)
+        escaped_msg = escape(clean_msg)
         console.print(
             Panel(
                 f"[bold red]{escaped_msg}[/]",
@@ -118,15 +271,13 @@ class AgentLogger:
                 border_style="red",
             )
         )
-        self.py_logger.error(message)
+        self.py_logger.error(clean_msg)
 
+        self._resume_active_status(saved_status)
 
-# -------------------------------------------------------------------
-# Standalone UI Rendering Functions (Decoupled from main.py)
-# -------------------------------------------------------------------
 
 def render_banner(workspace_root: Union[str, Path], obsidian_vault: Union[str, Path], max_retries: int) -> None:
-    """Render startup dashboard panel."""
+    """Render the application startup dashboard panel."""
     banner_text = (
         f"[bold cyan]📁 Workspace Root:[/bold cyan] [dim]{escape(str(workspace_root))}[/dim]\n"
         f"[bold cyan]📓 Obsidian Vault:[/bold cyan] [dim]{escape(str(obsidian_vault))}[/dim]\n"
@@ -144,12 +295,13 @@ def render_banner(workspace_root: Union[str, Path], obsidian_vault: Union[str, P
 
 
 def render_phase_header(phase_title: str) -> None:
-    """Render horizontal rule separator for major execution workflow phases."""
-    console.rule(f"[bold magenta]{escape(phase_title)}[/bold magenta]")
+    """Render a horizontal rule separator for primary execution workflow phases."""
+    clean_title = sanitize_text(phase_title)
+    console.rule(f"[bold magenta]{escape(clean_title)}[/bold magenta]")
 
 
 def render_success_panel(message: str) -> None:
-    """Render execution success outcome panel."""
+    """Render an execution success outcome panel."""
     console.print(
         Panel(
             escape(message.strip()),
@@ -160,7 +312,7 @@ def render_success_panel(message: str) -> None:
 
 
 def render_failure_panel(error_log: str, return_code: int) -> None:
-    """Render failure terminal log panel with syntax highlighting."""
+    """Render a failure execution panel with syntax highlighting for terminal logs."""
     console.print(
         Panel(
             Syntax(error_log[:500].strip(), "text", line_numbers=False),
@@ -171,7 +323,7 @@ def render_failure_panel(error_log: str, return_code: int) -> None:
 
 
 def render_rca_report_panel(report_text: str) -> None:
-    """Render Tester Agent RCA Review panel."""
+    """Render the Root Cause Analysis (RCA) review panel generated by the Tester Agent."""
     console.print(
         Panel(
             escape(report_text[:600].strip()),
@@ -182,7 +334,7 @@ def render_rca_report_panel(report_text: str) -> None:
 
 
 def render_human_intervention_panel() -> None:
-    """Render human intervention menu option panel."""
+    """Render the interactive human-in-the-loop fallback panel."""
     console.print(
         Panel(
             "[bold red]Maximum retry limit reached. Manual guidance required.[/bold red]\n\n"

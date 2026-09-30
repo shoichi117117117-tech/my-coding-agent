@@ -9,14 +9,16 @@ from google import genai
 from google.genai import types
 
 from config import Config
+from utils.ui import AgentLogger
 
-# Configure structured root logging format
+# Configure structured root logging format 
 logging.basicConfig(
     level=logging.INFO,
     format="%(asctime)s [%(name)s] %(levelname)s: %(message)s",
     datefmt="%H:%M:%S",
 )
 
+# python default library for a file that records logs
 logger = logging.getLogger("BaseAgent")
 litellm.suppress_debug_info = True
 
@@ -60,6 +62,9 @@ class BaseAgent:
         self.name = name
         self.system_prompt = system_prompt
         self.role = role.lower() if role else name.lower()
+
+        # UI logger initialization per agent
+        self.logger = AgentLogger(agent_name=self.name)
 
         # Native Gemini client initialization
         self.gemini_client: Optional[genai.Client] = None
@@ -159,7 +164,15 @@ class BaseAgent:
 
         for idx, model in enumerate(self.model_pipeline):
             try:
-                logger.info(f"[{self.name}] 🤖 Executing request via model: [{model}]")
+                if "openrouter" in model:
+                    provider = "openrouter"
+                elif "gemini" in model:
+                    provider = "google"
+                else:
+                    provider = "groq"
+
+                # for terminal log
+                self.logger.log_llm_request(model_name=model, provider=provider)
 
                 if model.startswith("gemini/") or model.startswith("gemini-"):
                     return self._call_gemini_native(
@@ -177,8 +190,8 @@ class BaseAgent:
 
             except Exception as e:
                 err_msg = str(e)
-                logger.warning(
-                    f"[{self.name}] ⚠️ Model [{model}] failed ({err_msg[:100]}...). Initiating fallback..."
+                self.logger.warning(
+                    f"Model [{model}] failed ({err_msg[:100]}...). Initiating fallback..."
                 )
                 last_error = e
 

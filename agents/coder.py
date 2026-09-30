@@ -3,7 +3,7 @@
 import json
 import re
 from pathlib import Path
-from typing import Any, Dict, List, Optional
+from typing import Any, Dict, List, Optional, Union
 
 from agents.base import BaseAgent, extract_response_content
 from tools.code_editor import CodeEditor
@@ -42,7 +42,7 @@ Strict Operational Rules & Knowledge Retrieval Strategy:
    - Use workspace manipulation tools (`search_files`, `read_file`, `write_file`, `make_directory`, `delete_file`) to inspect workspace files and apply modifications accurately.
 """
 
-CODER_TOOLS = [
+CODER_TOOLS: List[Dict[str, Any]] = [
     {
         "type": "function",
         "function": {
@@ -111,7 +111,7 @@ CODER_TOOLS = [
                         "description": "Full file content to write",
                     },
                 },
-                "required": ["file_path", "content"],
+                "required": ["file_path"],
             },
         },
     },
@@ -157,11 +157,11 @@ class CoderAgent(BaseAgent):
 
     def __init__(
         self,
-        workspace_root: Optional[str] = None,
-        obsidian_vault_path: Optional[str] = None,
+        workspace_root: Optional[Union[str, Path]] = None,
+        obsidian_vault_path: Optional[Union[str, Path]] = None,
         model_fallback_list: Optional[List[str]] = None,
     ) -> None:
-        """Initialize CoderAgent with file editor and vault tools."""
+        """Initialize CoderAgent with file editor and obsidian vault tools."""
         self.workspace_root = Path(workspace_root).resolve() if workspace_root else Path.cwd()
         self.obsidian_vault_path = Path(obsidian_vault_path).resolve() if obsidian_vault_path else None
 
@@ -182,7 +182,7 @@ class CoderAgent(BaseAgent):
         )
 
     def extract_pure_code(self, raw_text: str) -> str:
-        """Extract clean code string stripping markdown code block delimiters."""
+        """Extract clean code string, stripping markdown code block delimiters."""
         text = raw_text.strip()
         match = re.search(r"```(?:\w+)?\s*([\s\S]*?)\s*```", text, re.IGNORECASE)
         if match:
@@ -190,20 +190,26 @@ class CoderAgent(BaseAgent):
         return text
 
     def _execute_tool_call(self, tool_call: Any) -> str:
-        """Dispatch function calls to Obsidian adapter or CodeEditor tool methods."""
+        """Dispatch tool calls to Obsidian adapter or CodeEditor instance."""
         func_name = tool_call.function.name
         try:
             args = json.loads(tool_call.function.arguments)
         except Exception as e:
-            return f"Error parsing arguments: {e}"
+            return f"Error parsing arguments for tool '{func_name}': {e}"
 
-        target_summary = args.get("file_path") or args.get("query") or args.get("dir_path") or ""
+        target_summary = str(args.get("file_path") or args.get("dir_path") or args.get("query") or args.get("keyword") or "")
         self.ui_logger.tool_call(func_name, target_summary)
 
         if func_name == "search_obsidian_vault":
             if not self.obsidian_adapter:
                 return "Error: Obsidian Vault adapter is not configured."
-            return self.obsidian_adapter.search(query=args.get("query", ""))
+
+            query = args.get("query", "")
+            content, read_sources = self.obsidian_adapter.search_with_sources(query=query)
+
+            if read_sources:
+                self.ui_logger.tool_result(read_sources)
+            return content
 
         tool_method = getattr(self.code_editor, func_name, None)
         if not tool_method:
@@ -226,12 +232,14 @@ class CoderAgent(BaseAgent):
         history: Optional[List[Dict[str, Any]]] = None,
         max_tool_iterations: int = 5,
         auto_fetch_vault_rules: bool = True,
+        iteration_current: int = 1,
+        iteration_total: int = 1,
     ) -> Any:
-        """Execute implementation tasks utilizing tool call loops."""
-        messages = list(history) if history else []
+        """Execute implementation tasks utilizing interactive tool call loops."""
+        messages: List[Dict[str, Any]] = list(history) if history else []
 
         if auto_fetch_vault_rules and self.obsidian_adapter:
-            vault_rules = self.obsidian_adapter.read_rules(task_instruction=task_description)
+            vault_rules = self.obsidian_adapter.read_rules(task_instruction=task_description[:100])
             active_rules = f"{rules}\n\n{vault_rules}".strip()
         else:
             active_rules = rules.strip() if rules else "No specific rules provided."
@@ -247,7 +255,7 @@ class CoderAgent(BaseAgent):
             )
 
         user_message_parts.append(
-            "CRITICAL DIRECTIVE: If your task involves setting up configuration files (e.g. pyproject.toml, package.json) "
+            "CRITICAL DIRECTIVE: If your task involves setting up configuration files (e.g., pyproject.toml, package.json) "
             "or framework structures, execute `search_obsidian_vault` tool FIRST to fetch project rules. "
             "Do NOT rely on assumptions."
         )
@@ -255,44 +263,46 @@ class CoderAgent(BaseAgent):
         user_message = "\n\n".join(user_message_parts)
         messages.append({"role": "user", "content": user_message})
 
-        self.ui_logger.start_action(f"Executing task: {task_description[:60]}...")
-
         is_config_task = any(
             kw in task_description.lower() for kw in ["pyproject", "toml", "package.json", "config", "manifest", "setup"]
         )
 
-        for iteration in range(max_tool_iterations):
-            if iteration == 0 and is_config_task and self.obsidian_adapter:
-                iteration_messages = messages + [{
-                    "role": "user",
-                    "content": (
-                        "SYSTEM MANDATE: Before writing any file, call `search_obsidian_vault` FIRST "
-                        "to inspect project schema guidelines and rules."
-                    )
-                }]
-            else:
-                iteration_messages = messages
+        self.ui_logger.info("Implementing code modifications...")
 
-            response = self.call_llm(messages=iteration_messages, tools=CODER_TOOLS)
-            message = response.choices[0].message if hasattr(response, "choices") else response
+        with self.ui_logger.status("Implementing code modifications..."):
+            for iteration in range(max_tool_iterations):
+                if iteration == 0 and is_config_task and self.obsidian_adapter:
+                    iteration_messages = messages + [{
+                        "role": "user",
+                        "content": (
+                            "SYSTEM MANDATE: Before writing any file, call `search_obsidian_vault` FIRST "
+                            "to inspect project schema guidelines and rules."
+                        )
+                    }]
+                else:
+                    iteration_messages = messages
 
-            raw_content = extract_response_content(message)
-            msg_dict = {"role": "assistant", "content": raw_content}
-            if hasattr(message, "tool_calls") and message.tool_calls:
-                msg_dict["tool_calls"] = message.tool_calls
-            messages.append(msg_dict)
+                response = self.call_llm(messages=iteration_messages, tools=CODER_TOOLS)
+                message = response.choices[0].message if hasattr(response, "choices") else response
 
-            if not hasattr(message, "tool_calls") or not message.tool_calls:
-                self.ui_logger.stop_action("Task implementation completed.")
-                return response
+                raw_content = extract_response_content(message)
 
-            for tool_call in message.tool_calls:
-                tool_result = self._execute_tool_call(tool_call)
-                messages.append({
-                    "role": "tool",
-                    "tool_call_id": tool_call.id,
-                    "content": tool_result,
-                })
+                msg_dict: Dict[str, Any] = {"role": "assistant", "content": raw_content}
+                if hasattr(message, "tool_calls") and message.tool_calls:
+                    msg_dict["tool_calls"] = message.tool_calls
+                messages.append(msg_dict)
 
-        self.ui_logger.stop_action("Task completed after tool iterations.")
+                if not hasattr(message, "tool_calls") or not message.tool_calls:
+                    self.ui_logger.stop_action("Code implementation completed.")
+                    return response
+
+                for tool_call in message.tool_calls:
+                    tool_result = self._execute_tool_call(tool_call)
+                    messages.append({
+                        "role": "tool",
+                        "tool_call_id": tool_call.id,
+                        "content": tool_result,
+                    })
+
+        self.ui_logger.stop_action("Code implementation completed.")
         return response
