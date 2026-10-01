@@ -5,6 +5,7 @@ from pathlib import Path
 from typing import Any, Dict, List, Optional, Tuple
 
 
+# --- Tool / Obsidian Adapter Implementation ---
 class ObsidianAdapter:
     """Safe adapter for reading rules, searching knowledge notes, writing logs, 
     and saving troubleshooting notes in an existing PARA Obsidian Vault.
@@ -31,59 +32,89 @@ class ObsidianAdapter:
         }
 
     def search_with_sources(
-        self, query: str, max_results: int = 5
+        self, query: Union[str, List[str]], max_results: int = 5
     ) -> Tuple[str, List[str]]:
-        """Search across all Markdown notes in the Obsidian Vault for matching keywords or phrases.
+        """Search across all Markdown notes in Obsidian Vault with relevance scoring.
 
-        :param query: Keyword or space-separated search query.
-        :param max_results: Maximum number of note snippets to return.
+        :param query: Raw search query string or pre-extracted clean keyword list.
+        :param max_results: Maximum number of top relevant note snippets to return.
         :return: Tuple containing (formatted_result_text, list_of_relative_file_paths)
         """
         if not self.vault_path.exists():
             return "Obsidian Vault directory does not exist.", []
 
-        keywords = [k.lower() for k in query.split() if k.strip()]
-        if not keywords:
-            return "Empty search query provided.", []
+        # Handle both pre-extracted keyword lists and raw string queries
+        if isinstance(query, list):
+            keywords = [k.lower().strip() for k in query if k and k.strip()]
+        elif isinstance(query, str):
+            keywords = [k.lower().strip() for k in query.split() if len(k.strip()) > 2]
+        else:
+            return "Invalid search query type provided.", []
 
-        matches = []
-        matched_sources = []
+        if not keywords:
+            return "Empty or invalid search query provided.", []
+
+        scored_matches = []  # List of tuples: (score, match_block, rel_path_str)
 
         for md_file in self.vault_path.rglob("*.md"):
-            # Ignore log files or hidden directories
+            # Ignore configuration or log directories
             if ".obsidian" in md_file.parts or "50_Logs" in md_file.parts:
                 continue
 
             try:
                 content = md_file.read_text(encoding="utf-8")
-                content_lower = content.lower()
+                rel_path = md_file.relative_to(self.vault_path)
+                rel_path_str = str(rel_path).replace("\\", "/")
+                filename_lower = md_file.stem.lower()
 
-                # Check if all or any keywords match
-                if any(kw in content_lower for kw in keywords):
-                    rel_path = md_file.relative_to(self.vault_path)
-                    rel_path_str = str(rel_path).replace("\\", "/")
+                score = 0
 
-                    # Extract concise snippet
-                    snippet_lines = [
-                        line for line in content.splitlines()
-                        if any(kw in line.lower() for kw in keywords)
-                    ]
-                    snippet = "\n".join(snippet_lines[:5])
-                    matches.append(f"--- Note: [[{rel_path_str}]] ---\n{snippet}")
-                    matched_sources.append(rel_path_str)
+                # 1. Title match scoring (Highest priority)
+                for kw in keywords:
+                    if kw in filename_lower:
+                        score += 10
 
-                    if len(matches) >= max_results:
-                        break
+                # 2. YAML frontmatter / Tag match scoring
+                lines = content.splitlines()
+                in_frontmatter = False
+                for line in lines[:20]:  # Inspect top 20 lines for YAML frontmatter
+                    line_lower = line.lower()
+                    if line_lower.startswith("---"):
+                        in_frontmatter = not in_frontmatter
+                        continue
+                    if in_frontmatter and any(kw in line_lower for kw in keywords):
+                        score += 5
+
+                # 3. Body content match scoring
+                body_matches = [
+                    line for line in lines
+                    if any(kw in line.lower() for kw in keywords)
+                ]
+                score += len(body_matches)
+
+                # Collect snippet if file has any match relevance
+                if score > 0:
+                    snippet = "\n".join(body_matches[:5])
+                    match_block = f"--- Note: [[{rel_path_str}]] (Relevance Score: {score}) ---\n{snippet}"
+                    scored_matches.append((score, match_block, rel_path_str))
+
             except Exception:
                 continue
 
-        if not matches:
+        if not scored_matches:
             return (
-                f"No relevant notes or guidelines found in Obsidian Vault for query: '{query}'.",
+                f"No relevant notes found in Obsidian Vault for query: '{query}'.",
                 [],
             )
 
-        return "\n\n".join(matches), matched_sources
+        # Sort matches by relevance score in descending order
+        scored_matches.sort(key=lambda x: x[0], reverse=True)
+
+        top_matches = scored_matches[:max_results]
+        formatted_text = "\n\n".join([m[1] for m in top_matches])
+        matched_sources = [m[2] for m in top_matches]
+
+        return formatted_text, matched_sources
 
     def search(self, query: str, max_results: int = 5) -> str:
         """Search across all Markdown notes in the Obsidian Vault for matching keywords.

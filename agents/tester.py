@@ -228,8 +228,12 @@ class TesterAgent(BaseAgent):
             if not self.obsidian_adapter:
                 return "Error: Obsidian Vault adapter is not configured."
 
-            query = args.get("query", "")
-            content, read_sources = self.obsidian_adapter.search_with_sources(query=query)
+            raw_query = args.get("query", "")
+
+            # Optimize raw query into clean keywords using agent's structured outputs
+            keywords = self._extract_search_keywords(raw_query)
+
+            content, read_sources = self.obsidian_adapter.search_with_sources(query=keywords)
 
             if read_sources:
                 self.ui_logger.tool_result(read_sources)

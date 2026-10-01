@@ -238,8 +238,11 @@ class PlannerAgent(BaseAgent):
 
             if auto_fetch_vault_rules and self.obsidian_adapter:
                 clean_query = sanitize_text(task_instruction)[:100]
+                keywords = self._extract_search_keywords(clean_query)
+
+                # Optimize raw query into clean keywords using agent's structured outputs
                 self.ui_logger.info("Searching Obsidian Vault for rules...")
-                self.ui_logger.tool_call("search_obsidian_vault", clean_query)
+                self.ui_logger.tool_call("search_obsidian_vault", keywords)
                 vault_rules = self.obsidian_adapter.read_rules(task_instruction=clean_query)
                 _, read_sources = self.obsidian_adapter.search_with_sources(query=clean_query)
 

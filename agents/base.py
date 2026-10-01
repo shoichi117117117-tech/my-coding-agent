@@ -9,7 +9,7 @@ from typing import Any, Dict, List, Optional, Type, TypeVar, Union
 import litellm
 from google import genai
 from google.genai import types
-from pydantic import BaseModel
+from pydantic import BaseModel, Field
 
 from config import Config
 from utils.ui import AgentLogger
@@ -52,6 +52,13 @@ def extract_response_content(response: Any) -> str:
 
     return str(response)
 
+# --- Pydantic Schema for Query Extraction ---
+class SearchQueryExtraction(BaseModel):
+    """Pydantic model for extracting clean search keywords from noisy or long raw queries."""
+
+    keywords: List[str] = Field(
+        description="Extract 1-4 core technical terms, error names, or specific concepts suitable for search (e.g., ['Pydantic', 'ValidationError', 'yaml'])."
+    )
 
 class BaseAgent:
     """Base Agent providing multi-provider model routing, fallback execution pipelines, and structured output parsing."""
@@ -89,6 +96,32 @@ class BaseAgent:
 
         self.model_pipeline = pipeline
         logger.info(f"[{self.name}] Initialized model pipeline: {self.model_pipeline}")
+
+    
+    def _extract_search_keywords(self, raw_query: str) -> List[str]:
+        """Extract clean technical keywords using the agent's assigned LLM model via structured outputs."""
+        # Short clean queries bypass LLM extraction to save latency and token costs
+        words = raw_query.strip().split()
+        if len(words) <= 3 and len(raw_query) < 40:
+            return [w.lower() for w in words if w]
+
+        try:
+            prompt = (
+                f"Extract key technical search terms from the following raw query or error log.\n"
+                f"Remove file paths, line numbers, standard english sentence fluff, and noisy stack trace lines.\n\n"
+                f"Raw Query:\n{raw_query}"
+            )
+            messages = [{"role": "user", "content": prompt}]
+
+            # Call the agent's own structured LLM pipeline
+            extracted: SearchQueryExtraction = self.call_llm_structured(
+                messages=messages,
+                response_format=SearchQueryExtraction,
+            )
+            return [k.lower().strip() for k in extracted.keywords if k.strip()]
+        except Exception as e:
+            self.logger.warning(f"Keyword extraction failed, falling back to basic split: {e}")
+            return [w.lower() for w in words if len(w) > 2]
 
     def _call_gemini_native(
         self,
