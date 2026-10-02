@@ -112,8 +112,8 @@ class ObsidianAdapter:
 
         top_matches = scored_matches[:max_results]
         formatted_text = "\n\n".join([m[1] for m in top_matches])
-        matched_sources = [m[2] for m in top_matches]
-
+        matched_sources = [f"{m[2]} (Score: {m[0]})" for m in top_matches]
+        
         return formatted_text, matched_sources
 
     def search(self, query: str, max_results: int = 5) -> str:

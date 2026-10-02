@@ -94,4 +94,37 @@ def test_relevance_scoring_priority(temp_vault: Path) -> None:
     assert len(sources) == 2
     # The note with title and tag matches must be ranked first
     assert "Pydantic_ValidationError.md" in sources[0]
-    assert "Relevance Score:" in content
+    assert "Relevance Score: 17" in content
+
+def test_score_formatting_in_matched_sources(temp_vault: Path) -> None:
+    """Verify that search_with_sources formats relative paths with scores for UI tree logging."""
+    adapter = ObsidianAdapter(vault_path=temp_vault)
+    _, sources = adapter.search_with_sources(query=["pydantic"])
+
+    assert len(sources) == 2
+    # Check that score annotation is correctly appended to relative path strings
+    assert "Pydantic_ValidationError.md (Score: 17)" in sources[0]
+    assert "General_Python_Tips.md (Score: 1)" in sources[1]
+
+
+def test_ui_logger_tool_result_formatting(capsys: pytest.CaptureFixture) -> None:
+    """Verify that ui_logger's tool_result renders tree structure with scores correctly."""
+    from utils.ui import AgentLogger
+
+    ui_logger = AgentLogger(agent_name="TesterAgent")
+    
+    mock_sources = [
+        "30_Resources/Troubleshooting/Pydantic_ValidationError.md (Score: 17)",
+        "30_Resources/Guides/General_Python_Tips.md (Score: 2)",
+    ]
+
+    # Execute UI logging
+    ui_logger.tool_result(detail=mock_sources)
+
+    captured = capsys.readouterr().out
+
+    output_lines = [line.strip() for line in captured.splitlines() if line.strip()]
+    
+    assert "Read (2 files):" in captured
+    assert "Pydantic_ValidationError.md" in captured
+    assert "17" in captured
