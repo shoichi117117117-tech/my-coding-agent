@@ -4,18 +4,18 @@ import json
 import re
 import sys
 from pathlib import Path
-from typing import Any, Dict, List, Optional
+from typing import Any, Dict, List, Optional, Tuple
 
 from rich.prompt import Prompt
 
-from agents.coder import CoderAgent
-from agents.planner import PlannerAgent
-from agents.tester import TesterAgent
-from config import Config
-from tools.obsidian import ObsidianAdapter
-from tools.terminal import TerminalRunner
-from utils.logger_config import setup_file_logging
-from utils import ui
+from my_coding_agent.agents.coder import CoderAgent
+from my_coding_agent.agents.planner import PlannerAgent
+from my_coding_agent.agents.tester import TesterAgent
+from my_coding_agent.config import Config
+from my_coding_agent.tools.obsidian import ObsidianAdapter
+from my_coding_agent.tools.terminal import TerminalRunner
+from my_coding_agent.utils.logger_config import setup_file_logging
+from my_coding_agent.utils import ui
 
 # Initialize file logging persistence at system startup
 setup_file_logging()
@@ -51,6 +51,40 @@ def parse_plan_steps(plan_output: Any) -> List[Dict[str, Any]]:
         except json.JSONDecodeError:
             pass
     return []
+
+
+def handle_max_retries_exhausted(
+    retry_count: int,
+    execution_history: List[Dict[str, Any]],
+    task_instruction: str,
+    obsidian: ObsidianAdapter,
+) -> Tuple[bool, str, int]:
+    """Handle human intervention when max retries are exhausted (DRY helper).
+    
+    Returns:
+        (should_break: bool, updated_formatted_instruction: str, updated_retry_count: int)
+    """
+    if retry_count < Config.MAX_RETRIES:
+        return False, task_instruction, retry_count
+
+    ui.render_human_intervention_panel()
+    user_feedback = Prompt.ask("[bold yellow]Decision[/bold yellow]", default="r").strip()
+
+    if user_feedback.lower() == "q":
+        sys_logger.warning("Workflow execution aborted by user.")
+        obsidian.append_log(
+            task_description=task_instruction,
+            status="ABORTED_BY_USER",
+            execution_history=execution_history,
+        )
+        return True, task_instruction, retry_count
+
+    updated_instruction = task_instruction
+    if user_feedback and user_feedback.lower() != "r":
+        updated_instruction += f"\n\n[Human Operator Guidance]: {user_feedback}"
+
+    # Reset retry count if the human operator chooses to retry ('r')
+    return False, updated_instruction, 0
 
 
 def run_agent_workflow() -> None:
@@ -185,21 +219,47 @@ def run_agent_workflow() -> None:
                 iteration_total=Config.MAX_RETRIES,
             )
 
-            # Step D: Sequential Plan Execution & Setup Commands
+            # Step D: Sequential Plan Execution & Setup Commands (with deduplication)
             plan_execution_failed = False
+            executed_commands = set()
             for step in plan_steps:
                 cmd_to_run = step.get("command_to_execute")
-                if cmd_to_run and test_command and cmd_to_run.strip() != test_command.strip():
-                    coder_logger.tool_call("Setup Command", cmd_to_run)
-                    setup_res = terminal.run(cmd_to_run, cwd=str(project_workspace))
-                    if not setup_res.success:
-                        coder_logger.error(f"Setup command failed: {cmd_to_run}")
-                        current_error = setup_res.stderr or setup_res.stdout
-                        plan_execution_failed = True
-                        break
+                if cmd_to_run and cmd_to_run not in executed_commands:
+                    if not test_command or cmd_to_run.strip() != test_command.strip():
+                        executed_commands.add(cmd_to_run)
+                        coder_logger.tool_call("Setup Command", cmd_to_run)
+                        setup_res = terminal.run(cmd_to_run, cwd=str(project_workspace))
+                        if not setup_res.success:
+                            coder_logger.error(f"Setup command failed: {cmd_to_run}")
+                            current_error = setup_res.stderr or setup_res.stdout
+                            plan_execution_failed = True
+                            ui.render_failure_panel(current_error, setup_res.returncode)
+                            
+                            tester_response = tester.execute_task(
+                                task_description=f"Analyze setup command failure ({cmd_to_run}) and perform Root Cause Analysis (RCA).",
+                                target_file="pyproject.toml",
+                                execution_log=current_error,
+                                auto_fetch_vault_rules=False,
+                            )
+                            tester_review = getattr(tester_response, "content", str(tester_response))
+                            ui.render_rca_report_panel(tester_review)
+
+                            tester.generate_obsidian_troubleshooting_note(
+                                error_title=f"Setup Failure ({cmd_to_run}) in {project_folder_name}",
+                                error_log=current_error,
+                                solution_summary=tester_review,
+                                save_to_vault=True,
+                                relative_folder="30_Resources/Troubleshooting",
+                            )
+                            break
 
             if plan_execution_failed:
                 retry_count += 1
+                should_break, formatted_instruction, retry_count = handle_max_retries_exhausted(
+                    retry_count, execution_history, formatted_instruction, obsidian
+                )
+                if should_break:
+                    break
                 continue
 
         except Exception as api_err:
@@ -234,7 +294,7 @@ def run_agent_workflow() -> None:
             ui.render_success_panel(
                 exec_result.stdout[:600] if exec_result.stdout else "All verification steps passed cleanly!"
             )
-            log_path = obsidian.append_log(
+            obsidian.append_log(
                 task_description=task_instruction,
                 status="SUCCESS",
                 execution_history=execution_history,
@@ -267,24 +327,11 @@ def run_agent_workflow() -> None:
             relative_folder="30_Resources/Troubleshooting",
         )
 
-        if retry_count >= Config.MAX_RETRIES:
-            ui.render_human_intervention_panel()
-
-            user_feedback = Prompt.ask("[bold yellow]Decision[/bold yellow]", default="r").strip()
-
-            if user_feedback.lower() == "q":
-                sys_logger.warning("Workflow execution aborted by user.")
-                obsidian.append_log(
-                    task_description=task_instruction,
-                    status="ABORTED_BY_USER",
-                    execution_history=execution_history,
-                )
-                break
-
-            if user_feedback and user_feedback.lower() != "r":
-                formatted_instruction += f"\n\n[Human Operator Guidance]: {user_feedback}"
-
-            retry_count = 0
+        should_break, formatted_instruction, retry_count = handle_max_retries_exhausted(
+            retry_count, execution_history, formatted_instruction, obsidian
+        )
+        if should_break:
+            break
 
 
 if __name__ == "__main__":

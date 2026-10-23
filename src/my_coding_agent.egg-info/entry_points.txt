@@ -1,0 +1,2 @@
+[console_scripts]
+my-coding-agent = my_coding_agent:main

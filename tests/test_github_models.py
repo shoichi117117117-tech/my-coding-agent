@@ -5,8 +5,8 @@ from pathlib import Path
 # Add project root to sys.path so modules can be imported from tests/
 sys.path.append(str(Path(__file__).resolve().parent.parent))
 
-from config import Config
-from agents.base import BaseAgent, extract_response_content
+from my_coding_agent.config import Config
+from my_coding_agent.agents.base import BaseAgent, extract_response_content
 
 # Configure logging for step-by-step connection visibility
 logging.basicConfig(level=logging.INFO, format="%(asctime)s [%(levelname)s] %(message)s")

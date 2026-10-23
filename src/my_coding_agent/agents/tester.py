@@ -8,10 +8,10 @@ from pathlib import Path
 from typing import Any, Dict, List, Optional, Union
 from pydantic import BaseModel, Field
 
-from agents.base import BaseAgent, extract_response_content
-from tools.code_editor import CodeEditor
-from tools.obsidian import ObsidianAdapter
-from utils.ui import AgentLogger
+from my_coding_agent.agents.base import BaseAgent, extract_response_content
+from my_coding_agent.tools.code_editor import CodeEditor
+from my_coding_agent.tools.obsidian import ObsidianAdapter
+from my_coding_agent.utils.ui import AgentLogger
 
 TESTER_SYSTEM_PROMPT = """You are the Lead QA & Knowledge Engineer (Tester Agent) responsible for inspecting code, generating test suites, analyzing execution logic, and providing diagnostic RCA feedback for the Planner Agent.
 
@@ -147,6 +147,8 @@ class TroubleshootingAnalysis(BaseModel):
 
 class TesterAgent(BaseAgent):
     """Tester Agent providing unit test generation, RCA reports, and troubleshooting note creation."""
+
+    __test__ = False
 
     def __init__(
         self,

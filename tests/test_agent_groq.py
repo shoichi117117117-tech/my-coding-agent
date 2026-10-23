@@ -5,8 +5,8 @@ from pathlib import Path
 # Add project root directory to Python path
 sys.path.append(str(Path(__file__).resolve().parent.parent))
 
-from config import Config
-from agents.base import BaseAgent, extract_response_content
+from my_coding_agent.config import Config
+from my_coding_agent.agents.base import BaseAgent, extract_response_content
 
 # Configure logging format for test execution
 logging.basicConfig(

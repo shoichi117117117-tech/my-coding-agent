@@ -5,10 +5,10 @@ import re
 from pathlib import Path
 from typing import Any, Dict, List, Optional, Union
 
-from agents.base import BaseAgent, extract_response_content
-from tools.code_editor import CodeEditor
-from tools.obsidian import ObsidianAdapter
-from utils.ui import AgentLogger
+from my_coding_agent.agents.base import BaseAgent, extract_response_content
+from my_coding_agent.tools.code_editor import CodeEditor
+from my_coding_agent.tools.obsidian import ObsidianAdapter
+from my_coding_agent.utils.ui import AgentLogger
 
 CODER_SYSTEM_PROMPT = """You are the Coder Agent responsible for implementing, refactoring, and maintaining production-grade code and project configuration files across workspace files.
 
@@ -28,6 +28,13 @@ Strict Operational Rules & Knowledge Retrieval Strategy:
 3. Manifest Generation & Schema Compliance:
    - Always create or update necessary project configuration manifests strictly aligned with the retrieved target language schema and Planner's instructions.
    - For Python projects using `uv`, strictly adhere to standard PEP 621 (`[project]`) specifications. NEVER generate vendor-specific configurations like `[tool.poetry]` unless explicitly commanded in the Vault guideline.
+   - **CRITICAL TOML FORMAT RULE**: NEVER write `[project.dependencies]` as a separate table header. Dependencies MUST always be written as an array inside the `[project]` table like this:
+     ```toml
+     [project]
+     dependencies = [
+         "pytest>=8.0.0",
+     ]
+     ```
 
 4. Directory Rules & Verification Readiness:
    - For Python projects, unit test files MUST ALWAYS be written inside a `tests/` directory (e.g., `tests/test_main.py`).

@@ -5,8 +5,8 @@ from unittest.mock import MagicMock
 import pytest
 from pydantic import BaseModel
 
-from agents.base import BaseAgent, SearchQueryExtraction
-from tools.obsidian import ObsidianAdapter
+from my_coding_agent.agents.base import BaseAgent, SearchQueryExtraction
+from my_coding_agent.tools.obsidian import ObsidianAdapter
 
 
 class MockAgent(BaseAgent):
@@ -109,7 +109,7 @@ def test_score_formatting_in_matched_sources(temp_vault: Path) -> None:
 
 def test_ui_logger_tool_result_formatting(capsys: pytest.CaptureFixture) -> None:
     """Verify that ui_logger's tool_result renders tree structure with scores correctly."""
-    from utils.ui import AgentLogger
+    from my_coding_agent.utils.ui import AgentLogger
 
     ui_logger = AgentLogger(agent_name="TesterAgent")
     

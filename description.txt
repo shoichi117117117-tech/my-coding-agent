@@ -186,7 +186,7 @@ terminal logでsearch_obsidian_vault()がtool callされた時に表示される
 
 
 
-
+Change the environment from pip to uv because it is a good practice for the modern engineering.
 
 
 

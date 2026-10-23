@@ -1,6 +1,6 @@
 from pathlib import Path
-from agents.tester import TesterAgent
-from tools.obsidian import ObsidianAdapter
+from my_coding_agent.agents.tester import TesterAgent
+from my_coding_agent.tools.obsidian import ObsidianAdapter
 
 # 1. Provide explicit path to your actual Obsidian Vault
 vault_path = Path.home() / "Obsidian" / "MyVault"  # Replace with real path

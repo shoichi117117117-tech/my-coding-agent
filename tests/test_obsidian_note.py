@@ -2,8 +2,8 @@ import os
 from datetime import datetime
 
 # Adjust the import path according to your project structure
-from agents.tester import TesterAgent
-from config import Config
+from my_coding_agent.agents.tester import TesterAgent
+from my_coding_agent.config import Config
 
 # 1. Initialize the agent
 tester = TesterAgent(

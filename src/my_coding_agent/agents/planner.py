@@ -6,9 +6,9 @@ from datetime import datetime
 from pathlib import Path
 from typing import Any, Dict, List, Optional, Union
 
-from agents.base import BaseAgent, extract_response_content
-from tools.obsidian import ObsidianAdapter
-from utils.ui import AgentLogger, sanitize_text
+from my_coding_agent.agents.base import BaseAgent, extract_response_content
+from my_coding_agent.tools.obsidian import ObsidianAdapter
+from my_coding_agent.utils.ui import AgentLogger, sanitize_text
 
 PLANNER_SYSTEM_PROMPT = """You are the Lead Software Architect and Planner Agent responsible for analyzing user requests, breaking down complex software development tasks into structured sequential steps, diagnosing runtime/terminal errors, and suggesting clean directory architectures and verification strategies.
 

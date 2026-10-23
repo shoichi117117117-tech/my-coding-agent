@@ -11,8 +11,8 @@ from google import genai
 from google.genai import types
 from pydantic import BaseModel, Field
 
-from config import Config
-from utils.ui import AgentLogger
+from my_coding_agent.config import Config
+from my_coding_agent.utils.ui import AgentLogger
 
 # Configure structured root logging format
 logging.basicConfig(
