@@ -31,14 +31,17 @@ Strict Operational Rules:
    - When execution failures occur, inspect code and configuration files (`pyproject.toml`, `package.json`, etc.) to conduct Root Cause Analysis (RCA).
    - Provide structured, actionable RCA diagnostic reports so the Planner can formulate concrete correction plans.
 
-4. Obsidian Knowledge Archival:
+4. Pre-Flight Tool Error Awareness:
+   - If a tool returns a syntax validation failure message (e.g., "PRE-FLIGHT SYNTAX ERROR"), inspect the file content and provide clear, corrective instructions in your analysis regarding syntax compliance.
+
+5. Obsidian Knowledge Archival:
    - When formatting resolved errors into Obsidian notes, strictly use YAML Frontmatter (`type: troubleshooting`, `date`, `tags`, `aliases`).
    - Use Obsidian WikiLinks (e.g., `[[Python]]` or `[[Testing-Guide]]`) to connect knowledge nodes.
 
-5. Language & Documentation Standard:
+6. Language & Documentation Standard:
    - ALL inline comments, docstrings, and technical reports MUST be written in ENGLISH.
 
-6. Tools Usage:
+7. Tools Usage:
    - Use `search_obsidian_vault` to query internal documentation and testing guidelines.
    - Use workspace manipulation tools (`read_file`, `search_files`, `write_file`, `delete_file`) to inspect workspace files and write test scripts safely.
 """
@@ -93,7 +96,7 @@ TESTER_TOOLS: List[Dict[str, Any]] = [
         "type": "function",
         "function": {
             "name": "write_file",
-            "description": "Write or overwrite content to a test file or documentation note safely.",
+            "description": "Write or overwrite content to a test file or documentation note safely. Executes pre-flight syntax checks on supported file formats.",
             "parameters": {
                 "type": "object",
                 "properties": {
@@ -128,6 +131,8 @@ TESTER_TOOLS: List[Dict[str, Any]] = [
         },
     },
 ]
+
+
 class TroubleshootingAnalysis(BaseModel):
     """Pydantic schema enforcing structured JSON output from the LLM."""
 
@@ -231,10 +236,7 @@ class TesterAgent(BaseAgent):
                 return "Error: Obsidian Vault adapter is not configured."
 
             raw_query = args.get("query", "")
-
-            # Optimize raw query into clean keywords using agent's structured outputs
             keywords = self._extract_search_keywords(raw_query)
-
             content, read_sources = self.obsidian_adapter.search_with_sources(query=keywords)
 
             if read_sources:
@@ -344,12 +346,10 @@ class TesterAgent(BaseAgent):
 
             messages = [{"role": "user", "content": user_prompt}]
 
-            # Request structured Pydantic object directly from LLM via OpenRouter/OpenAI API
             structured_data: TroubleshootingAnalysis = self.call_llm_structured(
                 messages=messages, response_format=TroubleshootingAnalysis
             )
 
-            # Sanitize dynamic technology tags
             tags = ["troubleshooting", "error-solution"]
             sanitized_extracted_tags = [
                 t.strip().lower().replace(" ", "-")
@@ -359,18 +359,15 @@ class TesterAgent(BaseAgent):
             tags.extend(sanitized_extracted_tags)
             unique_tags = list(dict.fromkeys(tags))
 
-            # Format WikiLinks cleanly
             related_topics = [
                 f'"[[{topic.strip()}]]"'
                 for topic in structured_data.related_topics
                 if topic.strip()
             ] or ['"[[Troubleshooting]]"']
 
-            # Construct YAML frontmatter blocks
             tags_yaml = "\n".join([f"  - {tag}" for tag in unique_tags])
             topics_yaml = "\n".join([f"  - {topic}" for topic in related_topics])
 
-            # Build clean markdown without any regular expressions or redundant text
             markdown_content = (
                 f"---\n"
                 f"type: troubleshooting\n"

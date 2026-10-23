@@ -27,7 +27,7 @@ Strict Operational Rules & Knowledge Retrieval Strategy:
 
 3. Manifest Generation & Schema Compliance:
    - Always create or update necessary project configuration manifests strictly aligned with the retrieved target language schema and Planner's instructions.
-   - For Python projects using `uv`, strictly adhere to standard PEP 621 (`[project]`) specifications. NEVER generate vendor-specific configurations like `[tool.poetry]` unless explicitly commanded in the Vault guideline.
+   - For Python projects using `uv`, strictly adhere to standard PEP 621 (`[project]`) and PEP 735 (`[dependency-groups]`) specifications. NEVER generate vendor-specific configurations like `[tool.poetry]` unless explicitly commanded in the Vault guideline.
    - **CRITICAL TOML FORMAT RULE**: NEVER write `[project.dependencies]` as a separate table header. Dependencies MUST always be written as an array inside the `[project]` table like this:
      ```toml
      [project]
@@ -36,15 +36,20 @@ Strict Operational Rules & Knowledge Retrieval Strategy:
      ]
      ```
 
-4. Directory Rules & Verification Readiness:
+4. Pre-Flight Validation & Tool-Error Self-Correction:
+   - If any tool (such as `write_file`) returns a "PRE-FLIGHT SYNTAX ERROR" or "PRE-FLIGHT VALIDATION FAILED" response:
+     DO NOT proceed to running terminal commands or ending your turn.
+   - Read the exact parser error details returned by the tool, fix the syntax or structural mistake immediately in your next step, and re-invoke `write_file` with the corrected content.
+
+5. Directory Rules & Verification Readiness:
    - For Python projects, unit test files MUST ALWAYS be written inside a `tests/` directory (e.g., `tests/test_main.py`).
    - Write clean, production-grade, fully executable code without placeholder stubs.
    - For standalone scripts or API services, ensure entry points work non-interactively.
 
-5. Language & Documentation Standard:
+6. Language & Documentation Standard:
    - ALL inline code comments, docstrings, and technical descriptions MUST be written in ENGLISH.
 
-6. Tool Usage:
+7. Tool Usage:
    - Use `search_obsidian_vault` to query internal documentation and rules.
    - Use workspace manipulation tools (`search_files`, `read_file`, `write_file`, `make_directory`, `delete_file`) to inspect workspace files and apply modifications accurately.
 """
@@ -105,7 +110,7 @@ CODER_TOOLS: List[Dict[str, Any]] = [
         "type": "function",
         "function": {
             "name": "write_file",
-            "description": "Write or overwrite content to a target file safely.",
+            "description": "Write or overwrite content to a target file safely. Automatically executes pre-flight syntax validation for Python, TOML, and JSON files.",
             "parameters": {
                 "type": "object",
                 "properties": {
@@ -118,7 +123,7 @@ CODER_TOOLS: List[Dict[str, Any]] = [
                         "description": "Full file content to write",
                     },
                 },
-                "required": ["file_path"],
+                "required": ["file_path", "content"],
             },
         },
     },
@@ -212,7 +217,6 @@ class CoderAgent(BaseAgent):
                 return "Error: Obsidian Vault adapter is not configured."
 
             raw_query = args.get("query", "")
-            # Optimize raw query into clean keywords using agent's structured outputs
             keywords = self._extract_search_keywords(raw_query)
             content, read_sources = self.obsidian_adapter.search_with_sources(query=keywords)
 

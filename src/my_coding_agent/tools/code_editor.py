@@ -1,6 +1,10 @@
 """Workspace manager and file system interface for multi-agent system tools."""
 
+import ast
+import json
 import os
+import re
+import tomllib
 from pathlib import Path
 from typing import List, Optional
 
@@ -37,17 +41,57 @@ class CodeEditor:
         return resolved
 
     def write_file(self, file_path: str, content: str) -> str:
-        """Write or overwrite text content to a file safely within workspace."""
-        if not str(file_path).strip():
-            return "Error: File path cannot be empty."
-
+        """Write file with automated normalized pre-flight syntax validation."""
         target_path = self._resolve_path(file_path)
+        ext = target_path.suffix.lower()
+
+        # --- NORMALIZED PRE-FLIGHT SYNTAX VALIDATION GATE ---
+        validation_error = None
+
         try:
-            target_path.parent.mkdir(parents=True, exist_ok=True)
-            target_path.write_text(content, encoding="utf-8")
-            return f"Successfully written to '{target_path.relative_to(self.workspace_root)}'"
+            if ext == ".py":
+                # Check Python syntax without executing the code
+                ast.parse(content)
+
+            elif ext == ".toml":
+                # 1. Catch the forbidden table header via regex (ignores spaces/formatting tricks)
+                if re.search(r"\[\s*project\.dependencies\s*\]", content, re.IGNORECASE):
+                    raise ValueError(
+                        "Forbidden [project.dependencies] table header detected. "
+                        "Dependencies must be specified as an array inside the [project] section, e.g.:\n"
+                        "dependencies = [\n    \"pkg>=1.0\"\n]"
+                    )
+
+                # 2. Standard TOML parser check & structural array verification
+                parsed_toml = tomllib.loads(content)
+                project_section = parsed_toml.get("project", {})
+                if isinstance(project_section, dict):
+                    if "dependencies" in project_section and not isinstance(project_section["dependencies"], list):
+                        raise ValueError(
+                            "Invalid [project.dependencies] format. "
+                            "Dependencies must be a sequence/array, never a map or dictionary."
+                        )
+
+            elif ext in (".json",):
+                # Check JSON formatting
+                json.loads(content)
+
         except Exception as e:
-            return f"Failed to write file '{file_path}': {str(e)}"
+            validation_error = str(e)
+
+        # If syntax is invalid, reject the write and feed the error back to the Coder agent
+        if validation_error:
+            return (
+                f"❌ PRE-FLIGHT VALIDATION FAILED: Cannot write '{file_path}' due to syntax/parse errors.\n"
+                f"Parser Error Details: {validation_error}\n"
+                f"Please fix the syntax error in your content and try writing the file again."
+            )
+        # ----------------------------------------------------
+
+        # If valid, proceed to save the file safely at target_path
+        target_path.parent.mkdir(parents=True, exist_ok=True)
+        target_path.write_text(content, encoding="utf-8")
+        return f"Successfully wrote and validated {file_path}"
 
     def read_file(self, file_path: str) -> str:
         """Read and return utf-8 text content from a file."""
@@ -180,8 +224,9 @@ def search_files(keyword: str) -> str:
     """Public tool wrapper to search workspace files by keyword or extension."""
     return _default_editor.search_files(keyword)
 
+
 def delete_file(file_path: str) -> str:
-    """public tool wrapper to delete unneccesary files"""
+    """Public tool wrapper to delete unnecessary files."""
     return _default_editor.delete_file(file_path)
 
 
