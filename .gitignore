@@ -19,3 +19,6 @@ logs/
 
 # description
 description.txt
+
+# agent_log_terminal
+agent_log_terminal.txt
