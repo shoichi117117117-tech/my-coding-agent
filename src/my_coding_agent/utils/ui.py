@@ -312,10 +312,16 @@ def render_success_panel(message: str) -> None:
 
 
 def render_failure_panel(error_log: str, return_code: int) -> None:
-    """Render a failure execution panel with syntax highlighting for terminal logs."""
+    """Render a failure execution panel, preserving the tail where root exceptions appear."""
+    cleaned = error_log.strip()
+    if len(cleaned) > 1500:
+        display_log = f"{cleaned[:350]}\n...\n{cleaned[-1100:]}"
+    else:
+        display_log = cleaned
+
     console.print(
         Panel(
-            Syntax(error_log[:500].strip(), "text", line_numbers=False),
+            Syntax(display_log, "text", line_numbers=False),
             title=f"[bold red]❌ [EXECUTION FAILED] Exit Code: {return_code}[/bold red]",
             border_style="red",
         )

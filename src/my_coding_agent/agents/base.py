@@ -37,11 +37,11 @@ def extract_response_content(response: Any) -> str:
         choice = response.choices[0]
         if hasattr(choice, "message"):
             msg = choice.message
-            if hasattr(msg, "content") and msg.content is not None:
-                return msg.content
+            if hasattr(msg, "content"):
+                return msg.content or ""
 
-    if hasattr(response, "content") and response.content is not None:
-        return response.content
+    if hasattr(response, "content"):
+        return response.content or ""
 
     if isinstance(response, dict):
         choices = response.get("choices", [])
@@ -86,8 +86,9 @@ class BaseAgent:
         # Build execution pipeline prioritizing assigned role model
         pipeline: List[str] = []
         if self.role in Config.AGENT_MODEL_CONFIG:
-            primary_model = Config.AGENT_MODEL_CONFIG[self.role]
-            pipeline.append(primary_model)
+            primary_model = Config.normalize_model_name(Config.AGENT_MODEL_CONFIG[self.role])
+            if primary_model:
+                pipeline.append(primary_model)
 
         default_fallbacks = Config.get_model_fallbacks(model_fallback_list)
         for model in default_fallbacks:
@@ -134,7 +135,16 @@ class BaseAgent:
         if not self.gemini_client:
             raise ValueError("GEMINI_API_KEY is not configured.")
 
-        user_content = "\n".join([m.get("content", "") for m in messages if m.get("content")])
+        if tools:
+            raise NotImplementedError(
+                "Native Gemini client path does not execute OpenAI-format tool definitions; falling back."
+            )
+
+        user_content = "\n".join(
+            f"[{m.get('role', 'user').upper()}]: {m.get('content', '')}"
+            for m in messages
+            if m.get("content")
+        )
         
         # Determine MIME type or structured schema for Gemini SDK
         is_structured = response_format is not None
@@ -207,12 +217,16 @@ class BaseAgent:
 
         for idx, model in enumerate(self.model_pipeline):
             try:
-                if "openrouter" in model:
+                if model.startswith("openrouter/"):
                     provider = "openrouter"
-                elif "gemini" in model:
+                elif model.startswith("gemini/") or model.startswith("gemini-"):
                     provider = "google"
-                else:
+                elif model.startswith("groq/"):
                     provider = "groq"
+                elif model.startswith("openai/") or "/" not in model:
+                    provider = "openai"
+                else:
+                    provider = model.split("/", 1)[0]
 
                 # Log request metadata for CLI UI output
                 self.logger.log_llm_request(model_name=model, provider=provider)

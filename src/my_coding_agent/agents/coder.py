@@ -28,18 +28,23 @@ Strict Operational Rules & Knowledge Retrieval Strategy:
 3. Manifest Generation & Schema Compliance:
    - Always create or update necessary project configuration manifests strictly aligned with the retrieved target language schema and Planner's instructions.
    - For Python projects using `uv`, strictly adhere to standard PEP 621 (`[project]`) and PEP 735 (`[dependency-groups]`) specifications. NEVER generate vendor-specific configurations like `[tool.poetry]` unless explicitly commanded in the Vault guideline.
-   - **CRITICAL TOML FORMAT RULE**: NEVER write `[project.dependencies]` as a separate table header. Dependencies MUST always be written as an array inside the `[project]` table like this:
-     ```toml
-     [project]
-     dependencies = [
-         "pytest>=8.0.0",
-     ]
-     ```
+   - **CRITICAL TOML & HATCHLING RULES**:
+     - NEVER write `[project.dependencies]` as a separate table header, and NEVER nest `dependency-groups` inside `[project]`.
+     - If `[project]` includes `readme = "README.md"`, you MUST ALWAYS create `README.md` via `write_file` in the same turn; otherwise `hatchling` fails with `OSError: Readme file does not exist: README.md`.
+     - For flat script/module layouts (e.g., `main.py` or `slugify.py` in the workspace root without a package subfolder), OMIT `[build-system]` and set `[tool.uv]\npackage = false` so `uv sync` does not fail trying to build an editable wheel.
+     - Only use `[build-system]` with `hatchling.build` when creating an actual Python package directory (e.g., `<pkg_name>/__init__.py` or `src/<pkg_name>/__init__.py` with matching `[tool.hatch.build.targets.wheel] packages = [...]`), AND configure `[tool.pytest.ini_options]` (`pythonpath`, `testpaths`) to match test imports.
+     - Dependencies MUST always be written as an array inside `[project]`:
+       ```toml
+       [project]
+       dependencies = [
+           "pytest>=8.0.0",
+       ]
+       ```
 
 4. Pre-Flight Validation & Tool-Error Self-Correction:
-   - If any tool (such as `write_file`) returns a "PRE-FLIGHT SYNTAX ERROR" or "PRE-FLIGHT VALIDATION FAILED" response:
-     DO NOT proceed to running terminal commands or ending your turn.
-   - Read the exact parser error details returned by the tool, fix the syntax or structural mistake immediately in your next step, and re-invoke `write_file` with the corrected content.
+   - If any tool (such as `write_file`) returns a "PRE-FLIGHT SYNTAX ERROR", "PRE-FLIGHT VALIDATION FAILED", or "⚠️ WORKSPACE WARNINGS FOR `uv sync`" response:
+     DO NOT proceed to ending your turn.
+   - Read the exact error or warning details returned by the tool and resolve all missing files (e.g., `README.md`, package directory) or configuration mismatches immediately before finishing.
 
 5. Directory Rules & Verification Readiness:
    - For Python projects, unit test files MUST ALWAYS be written inside a `tests/` directory (e.g., `tests/test_main.py`).
@@ -194,9 +199,9 @@ class CoderAgent(BaseAgent):
         )
 
     def extract_pure_code(self, raw_text: str) -> str:
-        """Extract clean code string, stripping markdown code block delimiters."""
+        """Extract clean code string, stripping an outer markdown code block wrapper if present."""
         text = raw_text.strip()
-        match = re.search(r"```(?:\w+)?\s*([\s\S]*?)\s*```", text, re.IGNORECASE)
+        match = re.match(r"^```(?:\w+)?\s*\n([\s\S]*?)\n?```$", text, re.IGNORECASE)
         if match:
             return match.group(1).strip()
         return text
@@ -204,8 +209,14 @@ class CoderAgent(BaseAgent):
     def _execute_tool_call(self, tool_call: Any) -> str:
         """Dispatch tool calls to Obsidian adapter or CodeEditor instance."""
         func_name = tool_call.function.name
+        raw_args = tool_call.function.arguments
         try:
-            args = json.loads(tool_call.function.arguments)
+            if isinstance(raw_args, dict):
+                args = raw_args
+            elif not raw_args:
+                args = {}
+            else:
+                args = json.loads(raw_args)
         except Exception as e:
             return f"Error parsing arguments for tool '{func_name}': {e}"
 
@@ -230,7 +241,9 @@ class CoderAgent(BaseAgent):
 
         try:
             if func_name == "write_file" and "content" in args:
-                args["content"] = self.extract_pure_code(args["content"])
+                file_path = str(args.get("file_path", "")).lower()
+                if not file_path.endswith(".md"):
+                    args["content"] = self.extract_pure_code(args["content"])
             result = tool_method(**args)
             return str(result)
         except Exception as e:

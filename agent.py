@@ -1,15 +1,13 @@
 import json
-import os
 import re
 import time
-from typing import Any, Dict, List, Optional
+from typing import Any
 
+import litellm
+from config import Config
 from google import genai
 from google.genai import types
 from google.genai.errors import APIError
-import litellm
-
-from config import Config
 from tools.code_editor import CodeEditor
 
 # Suppress unnecessary debug logs from LiteLLM
@@ -25,7 +23,7 @@ class CodingAgent:
     def __init__(
         self,
         primary_model: str = "gemini-3.6-flash",
-        workspace_root: Optional[str] = None,
+        workspace_root: str | None = None,
     ):
         """Initialize AI clients, CodeEditor tools, and provider fallback pipeline."""
         # 1. Initialize Gemini SDK Client (used for native Gemini models)
@@ -48,7 +46,7 @@ class CodingAgent:
             "openrouter/deepseek/deepseek-r1",
         ]
 
-    def _execute_tool_call(self, tool_name: str, args: Dict[str, Any]) -> str:
+    def _execute_tool_call(self, tool_name: str, args: dict[str, Any]) -> str:
         """Execute local CodeEditor tool based on LLM function request."""
         try:
             if tool_name == "write_file":
@@ -64,10 +62,14 @@ class CodingAgent:
             else:
                 return f"Error: Unknown tool function '{tool_name}'"
         except Exception as e:
-            return f"Error executing tool '{tool_name}': {str(e)}"
+            return f"Error executing tool '{tool_name}': {e!s}"
 
     def _call_gemini_native(
-        self, model: str, prompt: str, system_instruction: str, tools: Optional[List[Any]] = None
+        self,
+        model: str,
+        prompt: str,
+        system_instruction: str,
+        tools: list[Any] | None = None,
     ) -> str:
         """Call Gemini API natively using official google-genai SDK."""
         if not self.gemini_client:
@@ -162,7 +164,7 @@ class CodingAgent:
         self,
         prompt: str,
         system_instruction: str,
-        tools: Optional[List[Any]] = None,
+        tools: list[Any] | None = None,
     ) -> str:
         """Try models in sequence (Gemini Native -> Groq -> OpenRouter) upon failures or throttling."""
         last_error = None
@@ -189,12 +191,16 @@ class CodingAgent:
 
             except (APIError, Exception) as e:
                 err_msg = str(e)
-                print(f"⚠️ Model/Provider [{model}] unavailable or failed ({err_msg[:100]}...). Switching fallback...")
+                print(
+                    f"⚠️ Model/Provider [{model}] unavailable or failed ({err_msg[:100]}...). Switching fallback..."
+                )
                 last_error = e
                 time.sleep(2)
                 continue
 
-        raise RuntimeError(f"❌ All AI Providers (Gemini, Groq, OpenRouter) failed. Last Error: {last_error}")
+        raise RuntimeError(
+            f"❌ All AI Providers (Gemini, Groq, OpenRouter) failed. Last Error: {last_error}"
+        )
 
     def suggest_project_folder(self, task_instruction: str) -> str:
         """Infer clean project directory name using task instruction."""
@@ -217,7 +223,9 @@ class CodingAgent:
             f"Based on this user task, suggest ONLY a single valid filename with extension (e.g. 'calculator.py'). "
             f"Do not include any markdown formatting, quotes, or explanations.\nTask: {task_instruction}"
         )
-        system_instruction = "You are a software architect that determines clean project file naming."
+        system_instruction = (
+            "You are a software architect that determines clean project file naming."
+        )
 
         try:
             raw_name = self._execute_with_fallback(prompt, system_instruction).strip()
@@ -229,10 +237,10 @@ class CodingAgent:
     def generate_code_solution(
         self,
         task_instruction: str,
-        target_file_path: Optional[str] = None,
-        file_content: Optional[str] = None,
-        obsidian_rules: Optional[str] = None,
-        error_context: Optional[str] = None,
+        target_file_path: str | None = None,
+        file_content: str | None = None,
+        obsidian_rules: str | None = None,
+        error_context: str | None = None,
     ) -> str:
         """Generate code solution with tools and multi-provider self-correction support."""
         prompt_parts = [
@@ -241,35 +249,43 @@ class CodingAgent:
         ]
 
         workspace_summary = self.code_editor.list_files()
-        prompt_parts.extend([
-            "\n### Existing Workspace Directory Structure",
-            "```text",
-            workspace_summary if workspace_summary else "Workspace is empty.",
-            "```",
-        ])
+        prompt_parts.extend(
+            [
+                "\n### Existing Workspace Directory Structure",
+                "```text",
+                workspace_summary if workspace_summary else "Workspace is empty.",
+                "```",
+            ]
+        )
 
         if target_file_path and file_content:
-            prompt_parts.extend([
-                "\n### Primary Target File Context",
-                f"Path: `{target_file_path}`",
-                "```",
-                file_content,
-                "```",
-            ])
+            prompt_parts.extend(
+                [
+                    "\n### Primary Target File Context",
+                    f"Path: `{target_file_path}`",
+                    "```",
+                    file_content,
+                    "```",
+                ]
+            )
 
-        prompt_parts.extend([
-            "\n### User Task / Instruction",
-            task_instruction,
-        ])
+        prompt_parts.extend(
+            [
+                "\n### User Task / Instruction",
+                task_instruction,
+            ]
+        )
 
         if error_context:
-            prompt_parts.extend([
-                "\n### ⚠️ Previous Terminal Execution Error (Self-Correction)",
-                "The previous code execution resulted in an error. Fix the issue using tool calls:",
-                "```text",
-                error_context.strip(),
-                "```",
-            ])
+            prompt_parts.extend(
+                [
+                    "\n### ⚠️ Previous Terminal Execution Error (Self-Correction)",
+                    "The previous code execution resulted in an error. Fix the issue using tool calls:",
+                    "```text",
+                    error_context.strip(),
+                    "```",
+                ]
+            )
 
         full_prompt = "\n".join(prompt_parts)
 
@@ -291,7 +307,9 @@ class CodingAgent:
             self.code_editor.list_files,
         ]
 
-        return self._execute_with_fallback(full_prompt, system_instruction, tools=tools_list)
+        return self._execute_with_fallback(
+            full_prompt, system_instruction, tools=tools_list
+        )
 
 
 # --- Standalone Agent Test ---
@@ -300,10 +318,14 @@ if __name__ == "__main__":
     try:
         agent = CodingAgent(workspace_root="./test_workspace")
 
-        inferred_folder = agent.suggest_project_folder("Build a simple REST API with FastAPI")
+        inferred_folder = agent.suggest_project_folder(
+            "Build a simple REST API with FastAPI"
+        )
         print(f"✅ Project Folder Suggestion: `{inferred_folder}`")
 
-        inferred_file = agent.suggest_target_file("Build a simple REST API with FastAPI")
+        inferred_file = agent.suggest_target_file(
+            "Build a simple REST API with FastAPI"
+        )
         print(f"✅ Target File Suggestion: `{inferred_file}`")
 
     except Exception as err:

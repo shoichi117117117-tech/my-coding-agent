@@ -2,7 +2,7 @@
 
 import pytest
 from pathlib import Path
-from my_coding_agent.tools.code_editor import CodeEditor
+from my_coding_agent.tools.code_editor import CodeEditor, validate_uv_project
 
 
 @pytest.fixture
@@ -87,3 +87,81 @@ def test_write_invalid_json(editor: CodeEditor) -> None:
     
     assert "PRE-FLIGHT VALIDATION FAILED" in result
     assert not (editor.workspace_root / "config.json").exists()
+
+
+def test_write_pyproject_rejects_nested_and_invalid_dependency_groups(editor: CodeEditor) -> None:
+    """Verify nested or malformed dependency-groups in pyproject.toml are rejected pre-flight."""
+    nested_toml = (
+        '[project]\n'
+        'name = "demo"\n'
+        'version = "0.1.0"\n'
+        'dependency-groups = { dev = ["pytest>=8.0.0"] }\n'
+    )
+    res_nested = editor.write_file("pyproject.toml", nested_toml)
+    assert "PRE-FLIGHT VALIDATION FAILED" in res_nested
+    assert not (editor.workspace_root / "pyproject.toml").exists()
+
+    bad_groups_toml = (
+        '[project]\n'
+        'name = "demo"\n'
+        'version = "0.1.0"\n\n'
+        '[dependency-groups]\n'
+        'dev = "pytest>=8.0.0"\n'
+    )
+    res_bad = editor.write_file("pyproject.toml", bad_groups_toml)
+    assert "PRE-FLIGHT VALIDATION FAILED" in res_bad
+    assert not (editor.workspace_root / "pyproject.toml").exists()
+
+
+def test_write_pyproject_warns_missing_readme_and_hatchling_package(editor: CodeEditor) -> None:
+    """Verify writing a hatchling pyproject.toml without README.md or package dir emits actionable warnings."""
+    hatch_toml = (
+        '[build-system]\n'
+        'requires = ["hatchling"]\n'
+        'build-backend = "hatchling.build"\n\n'
+        '[project]\n'
+        'name = "slugify-module"\n'
+        'version = "0.1.0"\n'
+        'readme = "README.md"\n\n'
+        '[tool.hatch.build.targets.wheel]\n'
+        'packages = ["slugify_module"]\n'
+    )
+    result = editor.write_file("pyproject.toml", hatch_toml)
+    assert "Successfully wrote and validated pyproject.toml" in result
+    assert "WORKSPACE WARNINGS FOR `uv sync`" in result
+    assert "README.md" in result
+    assert "slugify_module" in result
+
+
+def test_validate_uv_project_slugify_patterns(tmp_path: Path) -> None:
+    """Verify validate_uv_project catches both hatchling traps and accepts valid layouts."""
+    pyproject = tmp_path / "pyproject.toml"
+    pyproject.write_text(
+        '[build-system]\n'
+        'requires = ["hatchling"]\n'
+        'build-backend = "hatchling.build"\n\n'
+        '[project]\n'
+        'name = "slugify-module"\n'
+        'version = "0.1.0"\n'
+        'readme = "README.md"\n',
+        encoding="utf-8",
+    )
+    issues = validate_uv_project(tmp_path)
+    assert any("Missing readme file 'README.md'" in i for i in issues)
+    assert any("slugify_module/" in i for i in issues)
+
+    # Resolving both README.md and package dir clears all issues
+    (tmp_path / "README.md").write_text("# slugify-module\n", encoding="utf-8")
+    (tmp_path / "slugify_module").mkdir()
+    assert validate_uv_project(tmp_path) == []
+
+    # Flat script layout with [tool.uv] package = false is also valid without package dir
+    pyproject.write_text(
+        '[project]\n'
+        'name = "slugify-module"\n'
+        'version = "0.1.0"\n\n'
+        '[tool.uv]\n'
+        'package = false\n',
+        encoding="utf-8",
+    )
+    assert validate_uv_project(tmp_path) == []

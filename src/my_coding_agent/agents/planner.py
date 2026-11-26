@@ -30,6 +30,8 @@ Standard Project Layout & Execution Guidelines:
 
 2. Directory Structure & Test Placement:
    - Python Projects: Unit test files MUST ALWAYS be placed inside a `tests/` directory (e.g., `tests/test_main.py`), NEVER flat in the root directory.
+   - If `pyproject.toml` declares `readme = "README.md"`, `README.md` MUST be created in Step 1 (`target_files: ["pyproject.toml", "README.md"]`).
+   - For flat single-file/module Python workspaces, instruct Coder to set `[tool.uv] package = false` (omitting `[build-system]`), OR create a real `<pkg_name>/__init__.py` package directory matching `[tool.hatch.build.targets.wheel] packages` and `[tool.pytest.ini_options] pythonpath`.
    - JavaScript/TypeScript: Source code in `src/`, unit tests in `tests/` or `__tests__/`.
 
 JSON Output Format Requirement for create_plan():
@@ -168,11 +170,14 @@ class PlannerAgent(BaseAgent):
         structure = self.suggest_project_structure(task_instruction)
         return structure.get("folder_name", f"project_{datetime.now().strftime('%Y%m%d_%H%M%S')}")
 
-    def analyze_verification_strategy(self, task_instruction: str) -> Dict[str, Optional[str]]:
+    def analyze_verification_strategy(
+        self, task_instruction: str, target_file: Optional[str] = None
+    ) -> Dict[str, Optional[str]]:
         """Dynamically analyze project requirements to deduce automated verification command and mode."""
         with self.ui_logger.status("Determining project verification strategy..."):
-            structure = self.suggest_project_structure(task_instruction)
-            target_file = structure.get("main_file", "main.py")
+            if not target_file:
+                structure = self.suggest_project_structure(task_instruction)
+                target_file = structure.get("main_file", "main.py")
 
             prompt = (
                 f"Task Instruction: {task_instruction}\n"
@@ -286,6 +291,10 @@ class PlannerAgent(BaseAgent):
 
             try:
                 parsed_plan = json.loads(cleaned_json_str)
+                if isinstance(parsed_plan, list):
+                    parsed_plan = {"steps": parsed_plan}
+                elif not isinstance(parsed_plan, dict):
+                    return cleaned_json_str
                 steps = parsed_plan.get("steps", [])
                 self.ui_logger.stop_action(f"Plan generated successfully with {len(steps)} sub-tasks.")
                 return json.dumps(parsed_plan, indent=2, ensure_ascii=False)

@@ -59,6 +59,15 @@ class TerminalRunner:
         active_timeout = timeout if timeout is not None else self.default_timeout
         final_command = command.strip()
 
+        if not final_command:
+            return ExecutionResult(
+                success=False,
+                returncode=-1,
+                stdout="",
+                stderr="Error: Command cannot be empty.",
+                command="",
+            )
+
         # Generate isolated environment variables for the subprocess
         isolated_env = self._get_isolated_env()
 
@@ -86,10 +95,11 @@ class TerminalRunner:
         except subprocess.TimeoutExpired as e:
             error_msg = f"⏱️ Command timed out after {active_timeout} seconds: {final_command}"
             logger.error(f"[TerminalRunner] {error_msg}")
+            captured_stdout = e.stdout.decode("utf-8", errors="replace") if isinstance(e.stdout, bytes) else (e.stdout or "")
             return ExecutionResult(
                 success=False,
                 returncode=-1,
-                stdout=e.stdout or "",
+                stdout=captured_stdout,
                 stderr=error_msg,
                 command=final_command,
             )

@@ -57,8 +57,8 @@ class ObsidianAdapter:
         scored_matches = []  # List of tuples: (score, match_block, rel_path_str)
 
         for md_file in self.vault_path.rglob("*.md"):
-            # Ignore configuration or log directories
-            if ".obsidian" in md_file.parts or "50_Logs" in md_file.parts:
+            # Ignore configuration, git, archive, or log directories
+            if any(part in {".obsidian", ".git", "40_Archives", "50_Logs"} for part in md_file.parts):
                 continue
 
             try:
@@ -74,27 +74,39 @@ class ObsidianAdapter:
                     if kw in filename_lower:
                         score += 10
 
-                # 2. YAML frontmatter / Tag match scoring
+                # 2. YAML frontmatter / Tag match scoring (only if file begins with ---)
                 lines = content.splitlines()
-                in_frontmatter = False
-                for line in lines[:20]:  # Inspect top 20 lines for YAML frontmatter
-                    line_lower = line.lower()
-                    if line_lower.startswith("---"):
-                        in_frontmatter = not in_frontmatter
-                        continue
-                    if in_frontmatter and any(kw in line_lower for kw in keywords):
-                        score += 5
+                if lines and lines[0].strip() == "---":
+                    for line in lines[1:20]:
+                        line_lower = line.lower()
+                        if line_lower.startswith("---"):
+                            break
+                        if any(kw in line_lower for kw in keywords):
+                            score += 5
 
                 # 3. Body content match scoring
-                body_matches = [
-                    line for line in lines
+                matching_indices = [
+                    idx for idx, line in enumerate(lines)
                     if any(kw in line.lower() for kw in keywords)
                 ]
-                score += len(body_matches)
+                score += len(matching_indices)
 
-                # Collect snippet if file has any match relevance
+                # Collect contextual snippet if file has any match relevance
                 if score > 0:
-                    snippet = "\n".join(body_matches[:5])
+                    if len(lines) <= 60 and len(content) <= 2500:
+                        snippet = content.strip()
+                    elif matching_indices:
+                        # Include surrounding context windows (e.g., code blocks) around top matches
+                        included_indices: set[int] = set()
+                        for match_idx in matching_indices[:6]:
+                            start = max(0, match_idx - 2)
+                            end = min(len(lines), match_idx + 8)
+                            included_indices.update(range(start, end))
+                        ordered = sorted(included_indices)[:60]
+                        snippet = "\n".join(lines[i] for i in ordered)
+                    else:
+                        snippet = "\n".join(lines[:30])
+
                     match_block = f"--- Note: [[{rel_path_str}]] (Relevance Score: {score}) ---\n{snippet}"
                     scored_matches.append((score, match_block, rel_path_str))
 
@@ -131,6 +143,9 @@ class ObsidianAdapter:
         """Read core engineering rules unconditionally, and append domain-specific rules
         only if matching keywords are found in the task instruction.
         """
+        if not self.vault_path.exists():
+            return "No specific rules found."
+
         target_dir = self.vault_path / relative_rules_folder
 
         # Create default rules structure if directory does not exist

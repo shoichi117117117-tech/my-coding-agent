@@ -28,8 +28,9 @@ Strict Operational Rules:
    - Generate runnable unit tests or verification scripts matching the workspace tech stack.
 
 3. Diagnostic Feedback for Planner Agent (Root Cause Analysis):
-   - When execution failures occur, inspect code and configuration files (`pyproject.toml`, `package.json`, etc.) to conduct Root Cause Analysis (RCA).
-   - Provide structured, actionable RCA diagnostic reports so the Planner can formulate concrete correction plans.
+   - When execution failures occur, ALWAYS inspect the full workspace state using `read_file` and `search_files` (including `pyproject.toml`, `README.md`, and source/test imports) before concluding Root Cause Analysis (RCA).
+   - For `uv sync` / `hatchling` build failures, verify ALL build preconditions together rather than stopping at the first error line: (a) whether `[project].readme` points to an existing file on disk, (b) whether `[build-system]` uses `hatchling` without a matching package folder or `[tool.hatch.build.targets.wheel]` (or should instead use `[tool.uv] package = false` for flat scripts), and (c) whether `[tool.pytest.ini_options] pythonpath` matches test imports.
+   - Provide structured, actionable RCA diagnostic reports so the Planner can formulate complete correction plans.
 
 4. Pre-Flight Tool Error Awareness:
    - If a tool returns a syntax validation failure message (e.g., "PRE-FLIGHT SYNTAX ERROR"), inspect the file content and provide clear, corrective instructions in your analysis regarding syntax compliance.
@@ -182,9 +183,9 @@ class TesterAgent(BaseAgent):
         )
 
     def extract_pure_code(self, raw_text: str) -> str:
-        """Extract pure code string by removing markdown backtick code blocks."""
+        """Extract pure code string by removing an outer markdown backtick code block wrapper."""
         text = raw_text.strip()
-        match = re.search(r"```(?:\w+)?\s*([\s\S]*?)\s*```", text, re.IGNORECASE)
+        match = re.match(r"^```(?:\w+)?\s*\n([\s\S]*?)\n?```$", text, re.IGNORECASE)
         if match:
             return match.group(1).strip()
         return text
@@ -223,8 +224,14 @@ class TesterAgent(BaseAgent):
     def _execute_tool_call(self, tool_call: Any) -> str:
         """Execute dispatched tool actions for file manipulation and vault retrieval."""
         func_name = tool_call.function.name
+        raw_args = tool_call.function.arguments
         try:
-            args = json.loads(tool_call.function.arguments)
+            if isinstance(raw_args, dict):
+                args = raw_args
+            elif not raw_args:
+                args = {}
+            else:
+                args = json.loads(raw_args)
         except Exception as e:
             return f"Error parsing arguments for tool '{func_name}': {e}"
 
@@ -252,7 +259,9 @@ class TesterAgent(BaseAgent):
 
         try:
             if func_name == "write_file" and "content" in args:
-                args["content"] = self.extract_pure_code(args["content"])
+                file_path = str(args.get("file_path", "")).lower()
+                if not file_path.endswith(".md"):
+                    args["content"] = self.extract_pure_code(args["content"])
             result = tool_method(**args)
             return str(result)
         except Exception as e:
@@ -321,7 +330,7 @@ class TesterAgent(BaseAgent):
                     })
 
             self.ui_logger.stop_action("Verification task completed after tool iterations.")
-            return response
+            return extract_response_content(response)
 
     def generate_obsidian_troubleshooting_note(
         self,
